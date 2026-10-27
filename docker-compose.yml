@@ -1,0 +1,49 @@
+
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: securedapp_db
+    restart: always
+    environment:
+      POSTGRES_USER: securedapp
+      POSTGRES_PASSWORD: securedapp_pass
+      POSTGRES_DB: securedapp_gem
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U securedapp -d securedapp_gem"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: securedapp_redis
+    restart: always
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: securedapp_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://securedapp:securedapp_pass@db:5432/securedapp_gem
+      - REDIS_URL=redis://redis:6379/0
+      - ENVIRONMENT=development
+      - LOG_LEVEL=INFO
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+volumes:
+  postgres_data:

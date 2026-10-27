@@ -1,0 +1,64 @@
+import React from 'react';
+import { IconBell, IconSearch, IconSunMoon } from './icons';
+
+interface TopBarProps {
+  search: string;
+  onSearchChange: (value: string) => void;
+  theme: 'dark' | 'light';
+  onToggleTheme: () => void;
+  onOpenNotifications: () => void;
+  notificationCount: number;
+}
+
+/**
+ * Global top bar: search, theme toggle, notification drawer, avatar.
+ * Search is owned by the shell so it can drive the Bids page directly.
+ */
+export const TopBar: React.FC<TopBarProps> = ({
+  search,
+  onSearchChange,
+  theme,
+  onToggleTheme,
+  onOpenNotifications,
+  notificationCount,
+}) => {
+  return (
+    <header className="topbar">
+      <label className="topbar-search">
+        <IconSearch size={15} />
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="Search bids, organisations, products"
+          aria-label="Search bids, organisations, products"
+        />
+      </label>
+
+      <div className="topbar-actions">
+        <button
+          className="theme-toggle-btn"
+          onClick={onToggleTheme}
+          title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+          aria-label="Toggle theme"
+        >
+          <IconSunMoon size={16} />
+        </button>
+
+        <button
+          className="notif-btn"
+          onClick={onOpenNotifications}
+          aria-label="Open notifications"
+          title="Notifications"
+        >
+          <IconBell size={15} />
+          {notificationCount > 0 && <span className="notif-count">{notificationCount}</span>}
+        </button>
+
+        <div className="topbar-avatar" title="SecuredApp">
+          SA
+        </div>
+      </div>
+    </header>
+  );
+};
