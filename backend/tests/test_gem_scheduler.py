@@ -49,6 +49,13 @@ def _reset_state():
         gs._last_attempt = {}
         gs._consecutive_failures = 0
         gs._next_run_at = None
+    # Reset service module-level state so it cannot leak between tests.
+    # The service caches a shared collector, tracks a running flag, and
+    # remembers the last run info -- all module-level and shared across tests.
+    with svc._COLLECTOR_LOCK:
+        svc._COLLECTOR = None
+    svc._is_running = False
+    svc._last_run_info = {}
 
 
 @pytest.fixture(autouse=True)
