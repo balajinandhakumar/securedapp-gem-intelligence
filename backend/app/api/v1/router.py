@@ -5,8 +5,9 @@ from fastapi import APIRouter
 # the pre-existing `batch_processor -> ingestion.pipeline` cycle resolvable.
 # Reordering these imports breaks app
 # start-up.
-from app.api.v1.endpoints import health, products, bids, ingestion, analysis, dashboard, gem_direct
+from app.api.v1.endpoints import health, products, bids, ingestion, analysis, dashboard, gem_direct, all_india
 from app.api.v1.endpoints import sources
+from app.api.v1.endpoints import auth
 
 api_router = APIRouter()
 
@@ -16,6 +17,7 @@ api_router.include_router(bids.router, prefix="/bids", tags=["Bids"])
 api_router.include_router(ingestion.router, prefix="/ingestion", tags=["Ingestion"])
 api_router.include_router(analysis.router, tags=["Intelligence & Analysis"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
+api_router.include_router(all_india.router, tags=["All-India Matching"])
 
 # Direct GeM public collector. Manual-triggered collection of publicly
 # reachable GeM pages. Uses no credentials and no third-party data provider.
@@ -24,5 +26,8 @@ api_router.include_router(gem_direct.router, prefix="/ingestion", tags=["Ingesti
 # Configurable multi-source registry. Mounted after the GeM paths so a source
 # named like an existing route can never shadow them.
 api_router.include_router(sources.router, tags=["Sources"])
+
+# Authentication (login, logout, current-user, refresh) and user management.
+api_router.include_router(auth.router, tags=["Authentication"])
 
 

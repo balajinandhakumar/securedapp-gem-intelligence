@@ -6,7 +6,11 @@ export type AppTab =
   | 'recent'
   | 'products'
   | 'ingestion'
-  | 'notifications';
+  | 'notifications'
+  | 'state-tenders'
+  | 'state-wise-bids'
+  | 'all-india-matches'
+  | 'scraper-monitoring';
 
 export interface BoqItem {
   item_number?: string | null;
@@ -56,6 +60,7 @@ export interface Bid {
   tender_fee_information: any;
   contact_information: any;
   source_url: string | null;
+  original_bid_url: string | null;
   status: string;
   content_hash?: string;
   first_discovered_at?: string;
@@ -257,6 +262,57 @@ export interface Product {
   categories: ProductCategory[];
 }
 
+/* -------------------------------------------------------------------------- */
+/* Product catalogue matching stats                                           */
+/* Populated by joining bids with their BidProductMatch records.              */
+/* -------------------------------------------------------------------------- */
+
+export interface ProductMatchingStats {
+  product_id: string;
+  product_name: string;
+  matching_tenders: number;      // distinct tenders with at least one match
+  total_matches: number;         // total (tender, product) match rows
+  highest_relevance_score: number | null;  // 0-1 normalized
+  highest_classification: string | null;   // MATCH / POSSIBLE_MATCH / NEEDS_REVIEW
+  matched_states: string[];      // distinct state/location names
+  matched_departments: string[]; // distinct departments
+  matched_organisations: string[]; // distinct organisations
+}
+
+export interface ProductCatalogueSummary {
+  total_products: number;
+  active_products: number;
+  total_categories: number;
+  products_with_matches: number;
+  total_matching_tenders: number;
+  product_stats: ProductMatchingStats[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* Product detail view                                                        */
+/* -------------------------------------------------------------------------- */
+
+export interface ProductDetailView {
+  product: Product;
+  matching_stats: ProductMatchingStats | null;
+  matching_tenders: ProductMatchTender[];
+}
+
+export interface ProductMatchTender {
+  bid_id: string;
+  tender_id: string | null;
+  title: string;
+  state: string;
+  department: string | null;
+  organisation: string | null;
+  closing_date: string | null;
+  estimated_value: number | null;
+  relevance_score: number;
+  match_classification: string;
+  explanation: string;
+  source_url: string | null;
+}
+
 export interface IngestionRun {
   id: string;
   source_adapter: string;
@@ -314,7 +370,11 @@ export interface DashboardActivity {
 }
 
 export interface DashboardMetrics {
+  /** Open / active bids only (closing_date is null or in the future). This is
+   *  NOT the total number of bids in the database — closed bids are excluded. */
   total_bids: number;
+  /** Bids whose submission deadline has passed. */
+  closed_bids: number;
   analyzed_bids: number;
   pending_analysis: number;
   relevant_bids: number;
@@ -343,11 +403,147 @@ export interface BidIntelligenceRow extends DashboardBidRow {
   location: string | null;
   scope_of_work: string | null;
   urgency: string | null;
+  source_url: string | null;
+  original_bid_url: string | null;
 }
 
 export interface BidIntelligenceFeed {
   total: number;
   bids: BidIntelligenceRow[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* State-wise bids (GET /api/v1/bids/state-wise)                              */
+/* Each row is one (bid, product_match) combination. A bid matching multiple  */
+/* products appears once per matched product.                                 */
+/* -------------------------------------------------------------------------- */
+
+export interface StateWiseProductMatch {
+  product_id: string;
+  product_name: string;
+  match_score: number;
+  match_type: string | null;
+  confidence: number | null;
+  evidence: Record<string, unknown> | null;
+  matching_keywords: string[];
+}
+
+export interface StateWiseBidRow {
+  id: string;
+  state: string;
+  state_id: string;
+  source: string;
+  source_id: string;
+  adapter_key: string;
+  bid_number: string | null;
+  gem_bid_id: string | null;
+  tender_id: string | null;
+  title: string;
+  organisation: string | null;
+  department: string | null;
+  matched_product: string | null;
+  match_state: string | null;
+  relevance_score: number | null;
+  analyzed: boolean;
+  estimated_value: number | null;
+  currency: string;
+  published_date: string | null;
+  closing_date: string | null;
+  days_remaining: number | null;
+  deadline_status: string;
+  status: string;
+  matching_status: string | null;
+  matched_at: string | null;
+  source_url: string | null;
+  original_bid_url: string | null;
+  product_matches: StateWiseProductMatch[];
+  matched_product_count: number;
+}
+
+export interface StateWiseBidsResponse {
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  bids: StateWiseBidRow[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* All-India product-relevant bid matching dashboard (GET /api/v1/dashboard/all-india/*) */
+/* Every figure below is derived from persisted bid-to-product matches only.   */
+/* -------------------------------------------------------------------------- */
+
+export type AllIndiaClassification =
+  | 'Highly Relevant'
+  | 'Relevant'
+  | 'Potentially Relevant'
+  | 'Not Relevant';
+
+export interface AllIndiaMatchRow {
+  bid_id: string;
+  gem_bid_id: string | null;
+  bid_number: string | null;
+  tender_id: string | null;
+  title: string;
+  location: string;        // bid location, or 'Location Not Disclosed by Source'
+  state: string;           // normalized state or same as location for filtering
+  city: string | null;     // city/district component when available
+  location_quality: string; // 'AVAILABLE' | 'NOT_DISCLOSED' | 'EXTRACTION_FAILED'
+  department: string | null;
+  organisation: string | null;
+  procuring_authority: string | null;
+  estimated_value: number | null;
+  currency: string;
+  published_date: string | null;
+  closing_date: string | null;
+  days_remaining: number | null;
+  product_id: string;
+  product_name: string;
+  relevance_score_100: number;   // 0-100
+  classification: AllIndiaClassification;
+  match_state: string | null;
+  confidence: number;
+  matching_keywords: string[];
+  explanation: string;
+  technical_requirements: string;
+  source_url: string | null;
+  original_bid_url: string | null;
+  score_breakdown: Record<string, unknown>;
+}
+
+export interface AllIndiaBidsResponse {
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  min_score: number;
+  bids: AllIndiaMatchRow[];
+}
+
+export interface AllIndiaStateBucket {
+  location: string;
+  bid_count: number;
+  highly_relevant: number;
+  relevant: number;
+  potentially_relevant: number;
+}
+
+export interface AllIndiaProductBucket {
+  product_name: string;
+  bid_count: number;
+}
+
+export interface AllIndiaSummary {
+  total_bids: number;
+  total_relevant_bids: number;
+  highly_relevant_bids: number;
+  relevant_bids: number;
+  potentially_relevant_bids: number;
+  states_covered: number;
+  products_with_matches: number;
+  location_qualities?: { AVAILABLE: number; NOT_DISCLOSED: number; EXTRACTION_FAILED: number };
+  state_distribution: AllIndiaStateBucket[];
+  product_distribution: AllIndiaProductBucket[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -360,8 +556,127 @@ export interface ProductCreatePayload {
   description?: string | null;
 }
 
+export interface ProductKeywordPayload {
+  keyword: string;
+  weight?: number;
+  type?: string;
+  active?: boolean;
+}
+
 export interface ApiError {
   detail: string;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Authentication types (Phase 5.1 — Backend auth integration)                */
+/* Contract: PHASE_5_0_AUTH_API_CONTRACT.md                                   */
+/* -------------------------------------------------------------------------- */
+
+export type UserRole = 'admin' | 'operator' | 'viewer';
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  active: boolean;
+}
+
+export interface AuthTokens {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number; // seconds
+}
+
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface LoginResponse {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number;
+  user: AuthUser;
+}
+
+export interface RefreshRequest {
+  refresh_token: string;
+}
+
+export interface RefreshResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+}
+
+/**
+ * Role-based capability matrix from the verified backend contract.
+ * Frontend permissions improve UX; backend authorization remains the boundary.
+ */
+export const ROLE_CAPABILITIES: Record<UserRole, {
+  canRead: boolean;
+  canWriteProducts: boolean;
+  canManageSources: boolean;
+  canManageUsers: boolean;
+  canRunMatching: boolean;
+}> = {
+  admin: {
+    canRead: true,
+    canWriteProducts: true,
+    canManageSources: true,
+    canManageUsers: true,
+    canRunMatching: true,
+  },
+  operator: {
+    canRead: true,
+    canWriteProducts: true,
+    canManageSources: true,
+    canManageUsers: false,
+    canRunMatching: true,
+  },
+  viewer: {
+    canRead: true,
+    canWriteProducts: false,
+    canManageSources: false,
+    canManageUsers: false,
+    canRunMatching: false,
+  },
+};
+
+/**
+ * Returns true when the given role is permitted to perform a write action
+ * (create/update/delete) on products.
+ */
+export function canWriteProducts(role: UserRole | null): boolean {
+  if (!role) return false;
+  return ROLE_CAPABILITIES[role].canWriteProducts;
+}
+
+/**
+ * Returns true when the given role is permitted to manage data sources.
+ */
+export function canManageSources(role: UserRole | null): boolean {
+  if (!role) return false;
+  return ROLE_CAPABILITIES[role].canManageSources;
+}
+
+/**
+ * Returns true when the given role is permitted to manage users.
+ */
+export function canManageUsers(role: UserRole | null): boolean {
+  if (!role) return false;
+  return ROLE_CAPABILITIES[role].canManageUsers;
+}
+
+/**
+ * Returns true when the given role is permitted to run matching.
+ */
+export function canRunMatching(role: UserRole | null): boolean {
+  if (!role) return false;
+  return ROLE_CAPABILITIES[role].canRunMatching;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -384,7 +699,8 @@ export type SourceStatus =
   | 'NO_RECORDS'
   | 'SKIPPED'
   | 'BUSY'
-  | 'PREVIEW';
+  | 'PREVIEW'
+  | 'NOT_CONFIGURED';
 
 export interface AdapterMeta {
   adapter_key: string;

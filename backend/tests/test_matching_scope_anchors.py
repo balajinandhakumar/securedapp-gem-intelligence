@@ -68,8 +68,13 @@ class TestAuditExpressTruePositive:
         assert len(audit.signals) > 0
         assert any(s["text"] == "penetration testing" for s in audit.signals)
 
+        # SolidityShield is a smart-contract security product. A general
+        # penetration-testing tender has no smart-contract domain anchor, so
+        # SolidityShield is domain-gated to NEEDS_REVIEW (never auto-matched).
         shield = _top(results, "SolidityShield")
-        assert shield.match_state in ("MATCH", "POSSIBLE_MATCH")
+        assert shield.match_state == "NEEDS_REVIEW"
+        assert shield.relevance_score == 0.3999
+        assert shield.score_breakdown.get("domain_gate") == "NO_DOMAIN_ANCHOR"
 
     def test_vulnerability_assessment_bid_matches(self, db):
         bid = _bid(

@@ -30,6 +30,7 @@ SCOPE AND COMPLIANCE
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -38,13 +39,21 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.bid import Bid
+from app.models.analysis import BidScore
 from app.models.collection import CollectionRun, RawBidPayload
+from app.models.source_discovery import SourceDiscovery
 from app.services.ingestion.duplicate_detector import check_duplicate
 from app.services.ingestion.gem_boq_auto import enrich_collected_bids
+from app.services.ingestion.gem_document_extractor import (
+    DocumentExtractionResult,
+    enrich_record_from_document,
+    is_pdf_document_url,
+)
 from app.services.ingestion.gem_direct_adapter import GeMPublicAdapter
 from app.services.ingestion.gem_public_collector import (
     DEFAULT_LISTING_URL,
@@ -77,6 +86,195 @@ _last_run_info: Dict[str, Any] = {
     "last_successful_collection": None,
     "last_result": None,
 }
+
+# Checkpoint keys stored inside CollectionRun.notes.
+# ``last_completed_page`` tracks historical backlog scanning progress
+# (updated by manual runs only). ``monitoring_completed_page`` tracks
+# scheduled latest-first monitoring progress (updated by scheduler runs
+# only). These are independent so scheduled monitoring never overwrites
+# historical progress.
+_CHECKPOINT_KEY = "last_completed_page"
+_MONITORING_CHECKPOINT_KEY = "monitoring_completed_page"
+
+
+def _read_checkpoint_page(db: Session) -> Optional[int]:
+    """
+    Read the last successfully completed page from the most recent
+    CollectionRun notes that carries ``last_completed_page``.
+
+    Only runs triggered manually (not by the scheduler) write this key,
+    so scheduled monitoring runs never overwrite historical checkpoint
+    progress.
+    """
+    try:
+        run = (
+            db.query(CollectionRun)
+            .filter(CollectionRun.source_adapter == "GEM_DIRECT_PUBLIC_ADAPTER")
+            .filter(CollectionRun.status.in_(["SUCCESS", "PARTIAL"]))
+            .filter(CollectionRun.notes.like("%last_completed_page=%"))
+            .order_by(CollectionRun.started_at.desc())
+            .first()
+        )
+        if run is None or not run.notes:
+            return None
+        import re as _re
+
+        match = _re.search(r"last_completed_page=(\d+)", run.notes)
+        if match:
+            return int(match.group(1))
+    except Exception:  # noqa: BLE001 - checkpoint must never block collection
+        logger.warning("Could not read checkpoint page from database", exc_info=True)
+    return None
+
+
+def _read_monitoring_checkpoint_page(db: Session) -> Optional[int]:
+    """
+    Read the last completed page from the most recent scheduler monitoring run.
+    Used for informational purposes only; monitoring always starts at page 1.
+    """
+    try:
+        run = (
+            db.query(CollectionRun)
+            .filter(CollectionRun.source_adapter == "GEM_DIRECT_PUBLIC_ADAPTER")
+            .filter(CollectionRun.status.in_(["SUCCESS", "PARTIAL"]))
+            .filter(CollectionRun.notes.like("%monitoring_completed_page=%"))
+            .order_by(CollectionRun.started_at.desc())
+            .first()
+        )
+        if run is None or not run.notes:
+            return None
+        import re as _re
+
+        match = _re.search(r"monitoring_completed_page=(\d+)", run.notes)
+        if match:
+            return int(match.group(1))
+    except Exception:  # noqa: BLE001 - checkpoint must never block collection
+        logger.warning("Could not read monitoring checkpoint page from database", exc_info=True)
+    return None
+
+
+def _write_checkpoint_page(
+    db: Session,
+    run: CollectionRun,
+    page: int,
+    key: str = "last_completed_page",
+) -> None:
+    """Record the last completed page on the CollectionRun row.
+
+    ``key`` selects which checkpoint to update:
+    - ``last_completed_page`` for manual/historical runs
+    - ``monitoring_completed_page`` for scheduled monitoring runs
+    """
+    try:
+        notes = run.notes or ""
+        if f"{key}=" in notes:
+            import re as _re
+
+            notes = _re.sub(rf"{key}=\d+", f"{key}={page}", notes)
+        else:
+            notes = f"{notes};{key}={page}" if notes else f"{key}={page}"
+        run.notes = notes
+        db.flush()
+    except Exception:  # noqa: BLE001 - checkpoint must never block collection
+        logger.warning("Could not write checkpoint page to database", exc_info=True)
+
+
+def _record_source_discovery(
+    db: Session,
+    *,
+    run_id: Optional[str],
+    normalized: Dict[str, Any],
+    listing_page: Optional[int],
+    persisted: bool,
+    relevance_score: Optional[float],
+) -> Optional[SourceDiscovery]:
+    """
+    Record or update a source discovery ledger entry for one observed GeM bid.
+
+    Every valid bid observed during collection is recorded here, regardless of
+    relevance. NO_MATCH bids are discovered but not persisted as business bids.
+    Relevant bids are both discovered and persisted.
+
+    Returns the SourceDiscovery row, or None if recording fails.
+    """
+    try:
+        gem_bid_id = normalized.get("gem_bid_id")
+        bid_number = normalized.get("bid_number")
+        title = normalized.get("title", "")
+        organisation = normalised = normalized.get("organisation", "")
+        category = normalized.get("category")
+        source_url = normalized.get("source_url")
+        closing_date = normalized.get("closing_date")
+        closing_iso = closing_date.isoformat() if closing_date else None
+
+        # Build composite identity from stable fields when no GeM ID.
+        composite = None
+        lookup_id = None
+        if gem_bid_id:
+            lookup_id = str(gem_bid_id).strip().upper()
+        elif bid_number:
+            lookup_id = str(bid_number).strip().upper()
+        else:
+            basis = f"{title}|{organisation}|{closing_iso or ''}"
+            composite = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:64]
+            lookup_id = composite
+
+        # Look up existing discovery record by any known identity.
+        existing: Optional[SourceDiscovery] = None
+        if lookup_id:
+            filters = [
+                (SourceDiscovery.gem_bid_id == lookup_id)
+                | (SourceDiscovery.bid_number == lookup_id)
+            ]
+            if composite is not None:
+                filters.append(SourceDiscovery.composite_identity == composite)
+            existing = (
+                db.query(SourceDiscovery)
+                .filter(or_(*filters))
+                .first()
+            )
+
+        now = datetime.now(timezone.utc)
+
+        if existing:
+            existing.last_observed_at = now
+            existing.discovery_status = "updated"
+            db.flush()
+        else:
+            existing = SourceDiscovery(
+                gem_bid_id=gem_bid_id,
+                bid_number=bid_number,
+                composite_identity=composite,
+                source_url=source_url,
+                listing_page=listing_page,
+                collection_run_id=run_id,
+                first_discovered_at=now,
+                last_observed_at=now,
+                discovery_status="discovered",
+                persisted_as_business_bid=persisted,
+                relevance_score=relevance_score,
+                title=title,
+                organisation=organisation,
+                category=category,
+            )
+            db.add(existing)
+            db.flush()
+
+        # Update persistence status if this bid is relevant.
+        if persisted:
+            existing.persisted_as_business_bid = True
+            existing.relevance_score = relevance_score
+            db.flush()
+
+        return existing
+    except Exception:  # noqa: BLE001 - discovery ledger must never block collection
+        logger.warning(
+            "Could not record source discovery for bid %s",
+            normalized.get("gem_bid_id") or normalized.get("bid_number") or "unknown",
+            exc_info=True,
+        )
+        return None
+
 
 # Optional source-side pre-filter for SecuredApp-relevant terms.
 #
@@ -579,7 +777,12 @@ def collect_public_pages(
 
         # A successful response with no bid rows usually means the rows are
         # rendered client-side. Try one browser render before giving up.
-        if markup and not GeMPublicAdapter().parse_page(markup, source_url=url):
+        # Document URLs (PDF downloads at showbidDocument/<id>) are not HTML
+        # pages; attempting to render them in Playwright fails with
+        # "Download is starting". Skip browser render for those and let the
+        # document extraction path handle them instead.
+        is_doc_url = is_pdf_document_url(url)
+        if markup and not GeMPublicAdapter().parse_page(markup, source_url=url) and not is_doc_url:
             if browser_allowed:
                 try:
                     timeout_ms = max(15, int(getattr(settings, "GEM_DIRECT_TIMEOUT_SECONDS", 60))) * 1000
@@ -650,60 +853,162 @@ def _enrich_from_detail_pages(
 
     Enrichment is additive and strictly bounded. A detail page that fails is
     recorded and skipped: the listing-derived bid is still complete enough to
-    persist, so a detail failure can never delete a bid from the run. ``enabled``
-    and ``max_detail_pages`` override the configured defaults when supplied.
+    persist, so a detail failure can never delete a bid from the run.
+    ``enabled`` and ``max_detail_pages`` override the configured defaults when
+    supplied.
+
+    Detail URLs that point to GeM bid documents (PDF downloads at
+    ``showbidDocument/<id>``) are handled by the document extractor
+    (:mod:`app.services.ingestion.gem_document_extractor`) instead of being
+    rendered as HTML in Playwright, because GeM serves them as file downloads.
+    Document extraction is controlled by ``GEM_DIRECT_DOC_EXTRACTION_ENABLED``
+    and is independent of the HTML detail-page setting.
     """
     if enabled is None:
         enabled = bool(getattr(settings, "GEM_DIRECT_ENRICH_DETAIL_PAGES", False))
-    if not enabled:
+    doc_enabled = bool(
+        getattr(settings, "GEM_DIRECT_DOC_EXTRACTION_ENABLED", False)
+    )
+    if not enabled and not doc_enabled:
         return {}, []
 
     if max_detail_pages is None:
         max_detail_pages = int(getattr(settings, "GEM_DIRECT_MAX_DETAIL_PAGES", 0) or 0)
     budget = max(0, int(max_detail_pages or 0))
-    if budget <= 0:
+    if budget <= 0 and not doc_enabled:
         return {}, []
 
     errors: List[Dict[str, str]] = []
     enriched: Dict[str, Dict[str, Any]] = {}
     attempted = 0
     for record in records:
-        if attempted >= budget:
-            errors.append(
-                {
-                    "field": "detail_enrichment",
-                    "message": (
-                        f"Detail-page enrichment stopped at the configured budget of {budget} "
-                        "page(s) (GEM_DIRECT_MAX_DETAIL_PAGES). Remaining bids keep their listing data."
-                    ),
-                }
-            )
-            break
         url = (record.source_url or "").strip()
         if not url or not is_detail_url(url):
             continue
-        attempted += 1
-        try:
-            detail_pages, fetch_errors, _methods, _pagination = page_collector(
-                [url], use_browser=use_browser, paginate=False, max_pages=0
+
+        is_doc = is_pdf_document_url(url)
+        html_succeeded = False
+
+        # --- HTML detail-page path (tried first when enabled) -------------
+        if enabled:
+            if attempted >= budget and budget > 0:
+                errors.append(
+                    {
+                        "field": "detail_enrichment",
+                        "message": (
+                            f"Detail-page enrichment stopped at the configured budget of {budget} "
+                            f"page(s) (GEM_DIRECT_MAX_DETAIL_PAGES). Remaining bids keep their listing data."
+                        ),
+                    }
+                )
+                break
+            attempted += 1
+            try:
+                detail_pages, fetch_errors, _methods, _pagination = page_collector(
+                    [url], use_browser=use_browser, paginate=False, max_pages=0
+                )
+            except GeMBlockedError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one detail failure must not stop the run
+                errors.append({"field": "detail", "message": f"{url}: {type(exc).__name__}: {exc}"})
+                continue
+            errors.extend(fetch_errors)
+            if not detail_pages:
+                errors.append({"field": "detail", "message": f"{url}: detail page returned no content."})
+            else:
+                detail = adapter.parse_detail_page(
+                    detail_pages[0].get("html"), source_url=url
+                )
+                if detail is not None:
+                    html_succeeded = True
+                    key = (
+                        record.gem_bid_id or record.bid_number or ""
+                    ).strip().upper()
+                    enriched[key] = {
+                        field: getattr(detail, field, None)
+                        for field in _DETAIL_ENRICHABLE_FIELDS
+                    }
+                else:
+                    errors.append(
+                        {"field": "detail", "message": f"{url}: detail page yielded no bid fields."}
+                    )
+
+        # --- PDF document path (fallback when HTML yielded nothing) -------
+        if not html_succeeded and is_doc and doc_enabled:
+            if attempted >= budget and budget > 0:
+                errors.append(
+                    {
+                        "field": "detail_enrichment",
+                        "message": (
+                            f"Detail-page enrichment stopped at the configured budget of {budget} "
+                            f"page(s) (GEM_DIRECT_MAX_DETAIL_PAGES). Remaining bids keep their listing data."
+                        ),
+                    }
+                )
+                break
+            attempted += 1
+            try:
+                doc_result = enrich_record_from_document(
+                    record,
+                    timeout=float(
+                        getattr(
+                            settings,
+                            "GEM_DIRECT_DOC_FETCH_TIMEOUT_SECONDS",
+                            30.0,
+                        )
+                    ),
+                    max_size_bytes=int(
+                        getattr(settings, "GEM_DIRECT_MAX_DOC_SIZE_MB", 10)
+                    )
+                    * 1024
+                    * 1024,
+                    max_pages=int(
+                        getattr(settings, "GEM_DIRECT_MAX_DOC_PAGES", 0) or 0
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - one doc failure must not stop the run
+                errors.append(
+                    {
+                        "field": "detail",
+                        "message": f"{url}: document extraction raised {type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
+
+            if not doc_result.success:
+                errors.append(
+                    {
+                        "field": "detail",
+                        "message": (
+                            f"{url}: document extraction failed "
+                            f"({doc_result.error_type or 'unknown'}): {doc_result.error or 'no detail'}"
+                        ),
+                    }
+                )
+                continue
+
+            key = (record.gem_bid_id or record.bid_number or "").strip().upper()
+            enriched[key] = {
+                field: value
+                for field, value in (doc_result.extracted_fields or {}).items()
+                if value is not None
+            }
+            continue
+
+        # Document URL but document extraction is disabled, and HTML path
+        # already failed or was skipped: record the gap.
+        if is_doc and not doc_enabled and not html_succeeded:
+            errors.append(
+                {
+                    "field": "detail",
+                    "message": (
+                        f"{url}: GeM bid document detected but document "
+                        f"extraction is disabled "
+                        f"(GEM_DIRECT_DOC_EXTRACTION_ENABLED=false)."
+                    ),
+                }
             )
-        except GeMBlockedError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - one detail failure must not stop the run
-            errors.append({"field": "detail", "message": f"{url}: {type(exc).__name__}: {exc}"})
-            continue
-        errors.extend(fetch_errors)
-        if not detail_pages:
-            errors.append({"field": "detail", "message": f"{url}: detail page returned no content."})
-            continue
-        detail = adapter.parse_detail_page(detail_pages[0].get("html"), source_url=url)
-        if detail is None:
-            errors.append({"field": "detail", "message": f"{url}: detail page yielded no bid fields."})
-            continue
-        key = (record.gem_bid_id or record.bid_number or "").strip().upper()
-        enriched[key] = {
-            field: getattr(detail, field, None) for field in _DETAIL_ENRICHABLE_FIELDS
-        }
+
     return enriched, errors
 
 
@@ -758,6 +1063,20 @@ def ingest_gem_direct_bids(
     # page collection while started_at was captured after it, causing the
     # duration_seconds notes field to systematically overstate the run duration.
     run_started_at = datetime.now(timezone.utc)
+
+    # --- Auto-resume from checkpoint --------------------------------------
+    # When no explicit start_page is supplied and auto-resume is enabled,
+    # resume from the last successfully completed page recorded in the
+    # most recent CollectionRun notes. An explicit start_page always wins.
+    if start_page is None:
+        start_page = 1
+    elif getattr(settings, "GEM_DIRECT_AUTO_RESUME", False):
+        checkpoint_page = _read_checkpoint_page(db)
+        if checkpoint_page is not None:
+            start_page = checkpoint_page
+            logger.info(
+                "Auto-resuming GeM collection from checkpoint page %s", start_page
+            )
 
     run: Optional[CollectionRun] = None
     all_errors: List[Dict[str, str]] = []
@@ -1053,6 +1372,7 @@ def ingest_gem_direct_bids(
         fuzzy_candidates = 0
         fuzzy_suppressed = 0
         irrelevant_count = 0
+        _records_since_commit = 0
 
         for val_rec in valid_records:
             normalized = normalize_record(val_rec.raw)
@@ -1118,7 +1438,71 @@ def ingest_gem_direct_bids(
             else:
                 irrelevant_count += 1
 
+            # Periodically release the SQLite write lock so concurrent writers
+            # (e.g. login_attempts inserts during login) are not blocked for the
+            # entire duration of a long collection run.
+            _records_since_commit += 1
+            if _records_since_commit >= 50:
+                db.commit()
+                _records_since_commit = 0
+
         coverage["irrelevant_bids"] = irrelevant_count
+
+        # --- Source Discovery Ledger: record every observed GeM bid ----------
+        # Every valid record discovered on the source is recorded here,
+        # regardless of relevance. NO_MATCH bids are discovered but not
+        # persisted as business bids. Relevant bids are both discovered and
+        # persisted. This lets reconciliation distinguish "never seen" from
+        # "seen but not relevant."
+        for val_rec in valid_records:
+            normalized = normalize_record(val_rec.raw)
+            _record_source_discovery(
+                db=db,
+                run_id=str(run.id),
+                normalized=normalized,
+                listing_page=None,
+                persisted=False,
+                relevance_score=None,
+            )
+
+        # After matching decisions, mark relevant bids as persisted in the
+        # discovery ledger. Relevance score comes from BidScore if available.
+        for bid in created_bids + updated_bids:
+            score = None
+            try:
+                latest = (
+                    db.query(BidScore)
+                    .filter(BidScore.bid_id == bid.id)
+                    .order_by(BidScore.created_at.desc())
+                    .first()
+                )
+                if latest:
+                    score = latest.relevance_score
+            except Exception:  # noqa: BLE001 - score lookup must not block
+                pass
+            _record_source_discovery(
+                db=db,
+                run_id=str(run.id),
+                normalized={
+                    "gem_bid_id": bid.gem_bid_id,
+                    "bid_number": bid.bid_number,
+                    "title": bid.title,
+                    "organisation": bid.organisation,
+                    "category": bid.category,
+                    "source_url": bid.source_url,
+                    "closing_date": bid.closing_date,
+                },
+                listing_page=None,
+                persisted=True,
+                relevance_score=score,
+            )
+
+        # --- Commit persisted bid data before network-bound enrichment -----
+        # Releases the SQLite write lock before BoQ enrichment makes
+        # per-bid network calls. Without this, a long GeM collection run
+        # holds the write lock for the entire run, blocking concurrent
+        # writes such as login_attempts inserts and causing login timeouts.
+        db.commit()
 
         # --- 8. Existing matching / analysis / notifications --------------
         notifications_count = 0
@@ -1164,6 +1548,25 @@ def ingest_gem_direct_bids(
             run.status = "PARTIAL"
         else:
             run.status = "SUCCESS"
+
+        # Persist the last completed page as a checkpoint for auto-resume.
+        # Only SUCCESS and PARTIAL runs contribute a checkpoint; FAILED/BLOCKED
+        # runs may not have fully processed their last page.
+        # Scheduled monitoring runs write monitoring_completed_page so they
+        # never overwrite the historical last_completed_page checkpoint.
+        if run.status in ("SUCCESS", "PARTIAL"):
+            end_page = pagination.get("end_page")
+            if not end_page:
+                start = start_page if start_page is not None else 1
+                end_page = start + pagination.get("pages_visited", 0) - 1
+            if end_page:
+                checkpoint_key = (
+                    _MONITORING_CHECKPOINT_KEY
+                    if triggered_by == "scheduler"
+                    else _CHECKPOINT_KEY
+                )
+                _write_checkpoint_page(db, run, int(end_page), key=checkpoint_key)
+
         db.commit()
 
         coverage_note = ""
@@ -1303,3 +1706,125 @@ def gem_direct_status_payload() -> Dict[str, Any]:
         if key != "last_result"
     }
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Source-to-database reconciliation
+# ---------------------------------------------------------------------------
+def reconcile_gem_source_to_database(
+    db: Session,
+    max_pages: Optional[int] = None,
+    start_page: int = 1,
+    use_browser: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Reconcile the public GeM listing against the database.
+
+    Walks the GeM listing pages and compares every discovered GeM bid ID
+    against the database. Returns a detailed reconciliation report showing
+    which source IDs exist in the database, which are missing, and which
+    database IDs were not found in the scanned source scope.
+
+    Does NOT modify the database. Read-only.
+
+    Returns a dict with:
+      - scope: the listing scope used (URL, filters, sort)
+      - pages: pages attempted, completed, failed
+      - source_ids: unique GeM IDs discovered on the source
+      - db_ids: unique GeM IDs present in the database
+      - in_source_not_db: source IDs not found in the database
+      - in_db_not_source: database IDs not found in the scanned source scope
+      - matched: IDs present in both
+      - reconciliation_timestamp: UTC ISO-8601
+      - stop_reason: why the walk stopped
+      - limit_reached: whether the page budget truncated the walk
+    """
+    from datetime import timezone as _tz
+
+    # Collect all GeM bid IDs from the database
+    db_rows = db.query(Bid.gem_bid_id, Bid.bid_number).all()
+    db_gem_ids: Set[str] = set()
+    db_bid_numbers: Set[str] = set()
+    for gem_id, bid_num in db_rows:
+        if gem_id:
+            db_gem_ids.add(str(gem_id).strip().upper())
+        if bid_num:
+            db_bid_numbers.add(str(bid_num).strip().upper())
+
+    # Walk the GeM listing and collect all source IDs
+    pages, fetch_errors, methods, pagination = collect_public_pages(
+        [DEFAULT_LISTING_URL],
+        use_browser=use_browser,
+        max_pages=max_pages,
+        start_page=start_page,
+    )
+
+    # Parse all pages to extract bid references
+    adapter = GeMPublicAdapter()
+    source_gem_ids: Set[str] = set()
+    source_bid_numbers: Set[str] = set()
+    rows_seen = 0
+    parse_failures = 0
+
+    for page_payload in pages:
+        markup = page_payload.get("html", "")
+        page_url = page_payload.get("url", DEFAULT_LISTING_URL)
+        try:
+            records, failures, page_rows = adapter.parse_page_detailed(
+                markup, source_url=page_url, source_name="GeM"
+            )
+            rows_seen += page_rows
+            parse_failures += len(failures)
+            for record in records:
+                if record.gem_bid_id:
+                    source_gem_ids.add(str(record.gem_bid_id).strip().upper())
+                if record.bid_number:
+                    source_bid_numbers.add(str(record.bid_number).strip().upper())
+        except Exception:  # noqa: BLE001 - one bad page must not stop reconciliation
+            parse_failures += 1
+
+    # Compare sets
+    in_source_not_db = source_gem_ids - db_gem_ids
+    # Also check by bid_number as a fallback
+    for bn in source_bid_numbers:
+        if bn not in db_gem_ids and bn not in db_bid_numbers:
+            in_source_not_db.add(bn)
+
+    in_db_not_source = db_gem_ids - source_gem_ids
+    matched = source_gem_ids & db_gem_ids
+
+    return {
+        "scope": pagination.get("scope", {}),
+        "pages": {
+            "attempted": pagination.get("pages_visited", 0),
+            "completed": pagination.get("pages_visited", 0)
+            - int(pagination.get("page_failures") or 0),
+            "failed": int(pagination.get("page_failures") or 0),
+            "available": pagination.get("pages_available"),
+        },
+        "source_ids": {
+            "discovered": len(source_gem_ids),
+            "sample": sorted(source_gem_ids)[:10],
+        },
+        "db_ids": {
+            "present": len(db_gem_ids),
+            "sample": sorted(db_gem_ids)[:10],
+        },
+        "in_source_not_db": {
+            "count": len(in_source_not_db),
+            "sample": sorted(in_source_not_db)[:20],
+        },
+        "in_db_not_source": {
+            "count": len(in_db_not_source),
+            "sample": sorted(in_db_not_source)[:20],
+        },
+        "matched": {
+            "count": len(matched),
+        },
+        "reconciliation_timestamp": datetime.now(_tz.utc).isoformat(),
+        "stop_reason": pagination.get("stop_reason"),
+        "limit_reached": bool(pagination.get("limit_reached")),
+        "rows_seen": rows_seen,
+        "parse_failures": parse_failures,
+        "errors": fetch_errors,
+    }

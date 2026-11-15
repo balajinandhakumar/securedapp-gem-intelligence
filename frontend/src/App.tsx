@@ -1,4 +1,9 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import {
   AnalysisData,
   AppTab,
@@ -8,7 +13,12 @@ import {
   HumanReview,
   NotificationItem,
   Product,
+  UserRole,
 } from './types';
+import { api } from './lib/api';
+import { ApiError } from './lib/api';
+import { useAuth } from './context/AuthContext';
+import { Login } from './components/Login';
 import { IconRail } from './components/IconRail';
 import { TopBar } from './components/TopBar';
 import { DashboardView } from './components/DashboardView';
@@ -20,13 +30,21 @@ import { NotificationsView } from './components/NotificationsView';
 import { IngestionView } from './components/IngestionView';
 import { ClosingSoonView } from './components/ClosingSoonView';
 import { RecentIntelView } from './components/RecentIntelView';
+import { StateTendersView } from './components/StateTendersView';
+import { StateWiseBidsView } from './components/StateWiseBidsView';
+import { AllIndiaMatchesView } from './components/AllIndiaMatchesView';
+import { SourceMonitoringView } from './components/SourceMonitoringView';
+import { AccessDenied } from './components/AccessDenied';
+import { IconShieldCheck } from './components/icons';
 
+/**
+ * Read the error detail from a Response, falling back to a default message.
+ */
 async function readApiError(res: Response, fallback: string): Promise<string> {
   try {
     const data = await res.json();
     if (typeof data?.detail === 'string') return data.detail;
     if (Array.isArray(data?.detail) && data.detail.length > 0) {
-      // FastAPI validation errors
       return data.detail
         .map((d: { loc?: string[]; msg?: string }) => `${d.loc?.slice(1).join('.') ?? ''} ${d.msg ?? ''}`.trim())
         .join('; ');
@@ -38,7 +56,22 @@ async function readApiError(res: Response, fallback: string): Promise<string> {
   return fallback;
 }
 
-export default function App() {
+/**
+ * Inner application — rendered only when the user is authenticated.
+ * Contains all the pre-existing views and data-fetching logic, now using the
+ * auth-aware `api` utility so Bearer tokens and 401/403 handling are automatic.
+ */
+function InnerApp() {
+  const {
+    user,
+    logout,
+    refreshSession,
+    canWriteProducts,
+    canManageSources,
+    canManageUsers,
+    canRunMatching,
+  } = useAuth();
+
   const [activeTab, setActiveTab] = useState<AppTab>('dashboard');
 
   // Visual Theme State (dark / light with localStorage persistence)
@@ -59,7 +92,6 @@ export default function App() {
     setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
   }, []);
 
-  /** Typing in the top bar jumps to the Bids feed, which filters live on it. */
   const handleSearchChange = useCallback(
     (value: string) => {
       setSearchQuery(value);
@@ -88,9 +120,7 @@ export default function App() {
   const [bidReviews, setBidReviews] = useState<HumanReview[]>([]);
   const [loadingAnalysis, setLoadingAnalysis] = useState(false);
 
-  // Monotonic token guarding the drawer's async loads: only the most recent
-  // selection may write drawer state, so a slow response for an earlier bid can
-  // never overwrite the drawer for a bid the user opened after it.
+  // Monotonic token guarding the drawer's async loads
   const selectionTokenRef = useRef(0);
 
   // Notification Drawer State
@@ -101,69 +131,122 @@ export default function App() {
   const [drawerError, setDrawerError] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
 
+  // Access-denied state (403). When a backend call is rejected for
+  // insufficient permissions the AccessDenied component is shown in place of
+  // the current view. Frontend role gates reduce noise; backend authorization
+  // remains the security boundary, so a 403 from the backend always wins.
+  const [accessDenied, setAccessDenied] = useState<{
+    requiredRole?: string;
+  } | null>(null);
+
+  const clearAccessDenied = useCallback(() => {
+    setAccessDenied(null);
+    setGlobalError(null);
+  }, []);
+
   const fetchBids = useCallback(async () => {
     setLoadingBids(true);
     setGlobalError(null);
     try {
-      const res = await fetch('/api/v1/bids/intelligence');
-      if (res.ok) {
-        const data = await res.json();
-        setBids(data.bids ?? []);
-      } else {
-        setGlobalError(await readApiError(res, 'Failed to load bids from backend server.'));
+      const res = await api.get<{ bids?: BidIntelligenceRow[] }>('/api/v1/bids/intelligence');
+      setBids(res.bids ?? []);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        await refreshSession();
+        return;
       }
-    } catch {
-      setGlobalError('Unable to connect to backend API server. Verify backend is running.');
+      if (err instanceof ApiError && err.status === 403) {
+        setAccessDenied({ requiredRole: 'VIEWER' });
+        setGlobalError(null);
+        return;
+      }
+      if (err instanceof ApiError && err.isNetworkError) {
+        setGlobalError('Unable to connect to backend API server. Verify backend is running.');
+      } else if (err instanceof Error) {
+        setGlobalError(err.message);
+      }
     } finally {
       setLoadingBids(false);
     }
-  }, []);
+  }, [refreshSession]);
 
   const fetchSummary = useCallback(async () => {
     setLoadingSummary(true);
     try {
-      const res = await fetch('/api/v1/dashboard/summary');
-      if (res.ok) {
-        setSummary(await res.json());
-      } else if (res.status === 404) {
-        setSummary(null);
-      } else {
-        setGlobalError(await readApiError(res, 'Failed to load dashboard summary.'));
+      const res = await api.get<DashboardSummary>('/api/v1/dashboard/summary');
+      setSummary(res);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        await refreshSession();
+        return;
       }
-    } catch {
-      setGlobalError('Unable to reach the dashboard summary endpoint.');
+      if (err instanceof ApiError && err.status === 403) {
+        setAccessDenied({ requiredRole: 'VIEWER' });
+        setGlobalError(null);
+        setLoadingSummary(false);
+        return;
+      }
+      if (err instanceof ApiError && err.status === 404) {
+        setSummary(null);
+        setLoadingSummary(false);
+        return;
+      }
+      if (err instanceof ApiError && err.isNetworkError) {
+        setGlobalError('Unable to reach the dashboard summary endpoint.');
+      } else if (err instanceof Error) {
+        setGlobalError(err.message);
+      }
     } finally {
       setLoadingSummary(false);
     }
-  }, []);
+  }, [refreshSession]);
 
   const fetchProducts = useCallback(async () => {
     setLoadingProducts(true);
     try {
-      const res = await fetch('/api/v1/products');
-      if (res.ok) {
-        setProducts(await res.json());
+      const data = await api.get<Product[]>('/api/v1/products');
+      setProducts(data);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        await refreshSession();
+        return;
       }
-    } catch {
+      if (err instanceof ApiError && err.status === 403) {
+        setAccessDenied({ requiredRole: 'VIEWER' });
+        setGlobalError(null);
+        return;
+      }
       setGlobalError('Unable to load the product catalogue.');
     } finally {
       setLoadingProducts(false);
     }
-  }, []);
+  }, [refreshSession]);
 
   const fetchNotifications = useCallback(async () => {
     setLoadingNotifications(true);
+    setGlobalError(null);
     try {
-      const res = await fetch('/api/v1/notifications');
-      if (res.ok) {
-        setNotifications(await res.json());
+      const data = await api.get<NotificationItem[]>('/api/v1/notifications');
+      setNotifications(data);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        await refreshSession();
+        return;
       }
-    } catch {
-      /* notification drawer surfaces its own state */
+      if (err instanceof ApiError && err.status === 403) {
+        setAccessDenied({ requiredRole: 'VIEWER' });
+        setGlobalError(null);
+        return;
+      }
+      if (err instanceof ApiError && err.isNetworkError) {
+        setGlobalError('Unable to reach the notifications endpoint.');
+      } else if (err instanceof Error) {
+        setGlobalError(err.message);
+      }
     } finally {
       setLoadingNotifications(false);
     }
-  }, []);
+  }, [refreshSession]);
 
   useEffect(() => {
     fetchBids();
@@ -172,15 +255,42 @@ export default function App() {
     fetchNotifications();
   }, [fetchBids, fetchSummary, fetchProducts, fetchNotifications]);
 
-  // Keep the dashboard figures honest after any action that changes bid state.
   const refreshAll = useCallback(async () => {
-    await Promise.all([fetchBids(), fetchSummary(), fetchNotifications()]);
-  }, [fetchBids, fetchSummary, fetchNotifications]);
+    await Promise.all([fetchBids(), fetchSummary(), fetchProducts(), fetchNotifications()]);
+  }, [fetchBids, fetchSummary, fetchProducts, fetchNotifications]);
 
   const handleSelectBid = useCallback(
     async (bidId: string) => {
-      const row = bids.find((b) => b.id === bidId);
-      if (!row) return;
+      // The intelligence feed only carries open bids, but All-India matches can
+      // surface closed bids too. Fall back to the per-bid detail endpoint (any
+      // bid, open or closed) so "Inspect" still opens the bid-detail drawer.
+      let row = bids.find((b) => b.id === bidId);
+      if (!row) {
+        try {
+          const detail = await api.get<any>(`/api/v1/bids/${bidId}`);
+          row = {
+            id: detail.id,
+            gem_bid_id: detail.gem_bid_id,
+            bid_number: detail.bid_number,
+            title: detail.title,
+            organisation: detail.organisation,
+            department: detail.department ?? null,
+            category: detail.category ?? null,
+            published_date: detail.published_date,
+            closing_date: detail.closing_date,
+            location: detail.location,
+            estimated_value: detail.estimated_value,
+            currency: detail.currency,
+            scope_of_work: detail.scope_of_work,
+            status: detail.status,
+            last_updated_at: detail.last_updated_at,
+            analyzed: false,
+          } as any;
+        } catch {
+          setGlobalError('Unable to load bid details.');
+          return;
+        }
+      }
       const token = ++selectionTokenRef.current;
 
       setSelectedBid({
@@ -207,7 +317,8 @@ export default function App() {
         emd_information: null,
         tender_fee_information: null,
         contact_information: null,
-        source_url: null,
+        source_url: typeof row.source_url === 'string' ? row.source_url : null,
+        original_bid_url: typeof row.original_bid_url === 'string' ? row.original_bid_url : null,
         status: row.status,
         content_hash: null,
         first_discovered_at: row.last_updated_at ?? new Date().toISOString(),
@@ -221,16 +332,12 @@ export default function App() {
       try {
         if (!row.analyzed) {
           setDrawerError(
-            'This bid has not been analyzed yet. Opening it does not start analysis; use the "Run Analysis" action in the drawer.'
+            'This bid has not been analyzed yet. Opening it does not start analysis; use the "Run Analysis" action in the drawer.',
           );
         } else {
-          // Rehydrate the drawer from the analysis the pipeline already stored.
-          // The candidate list and scores come from persisted records, never
-          // from a client-side guess or a fallback product name.
-          const resAnalysis = await fetch(`/api/v1/bids/${bidId}/analysis`);
-          if (token !== selectionTokenRef.current) return;
-          if (resAnalysis.ok) {
-            const payload = await resAnalysis.json();
+          try {
+            const payload = await api.get<any>(`/api/v1/bids/${bidId}/analysis`);
+            if (token !== selectionTokenRef.current) return;
             const stored = payload?.analysis;
             if (stored) {
               const storedScore = payload?.score;
@@ -245,34 +352,35 @@ export default function App() {
             } else {
               setDrawerError('No analysis record was found for this bid.');
             }
-          } else {
+          } catch {
             setDrawerError('Stored analysis details could not be loaded from the backend.');
           }
         }
 
-        // source_url plus the persisted BoQ evidence are only served by the bid
-        // detail endpoint, so both are patched into the drawer selection once
-        // the detail arrives. `boq_items` is null when no BoQ was ever stored.
-        const resDetail = await fetch(`/api/v1/bids/${bidId}`);
-        if (token !== selectionTokenRef.current) return;
-        if (resDetail.ok) {
-          const detail = await resDetail.json();
+        try {
+          const detail = await api.get<any>(`/api/v1/bids/${bidId}`);
+          if (token !== selectionTokenRef.current) return;
           setSelectedBid((prev) =>
             prev && prev.id === bidId
               ? {
                   ...prev,
                   source_url: typeof detail?.source_url === 'string' ? detail.source_url : prev.source_url,
+                  original_bid_url: typeof detail?.original_bid_url === 'string' ? detail.original_bid_url : prev.original_bid_url,
                   boq_items: detail?.boq_items ?? null,
                   boq_checked_at: detail?.boq_checked_at ?? null,
                 }
               : prev
           );
+        } catch {
+          /* detail fetch failed — non-fatal */
         }
 
-        const resReviews = await fetch(`/api/v1/bids/${bidId}/reviews`);
-        if (token !== selectionTokenRef.current) return;
-        if (resReviews.ok) {
-          setBidReviews(await resReviews.json());
+        try {
+          const reviews = await api.get<HumanReview[]>(`/api/v1/bids/${bidId}/reviews`);
+          if (token !== selectionTokenRef.current) return;
+          setBidReviews(reviews);
+        } catch {
+          /* reviews fetch failed — non-fatal */
         }
       } catch {
         if (token === selectionTokenRef.current) {
@@ -289,55 +397,48 @@ export default function App() {
 
   const handleRunAnalysis = useCallback(async () => {
     if (!selectedBid) return;
+    if (!canRunMatching()) {
+      setDrawerError('Running analysis requires Operator or Admin role.');
+      return;
+    }
     setLoadingAnalysis(true);
     setDrawerError(null);
     try {
-      const resAnalyze = await fetch(`/api/v1/bids/${selectedBid.id}/analyze`, { method: 'POST' });
-      if (!resAnalyze.ok) {
-        setDrawerError(await readApiError(resAnalyze, 'Analysis failed.'));
-        return;
-      }
-      const data = await resAnalyze.json();
-
-      const resMatch = await fetch(`/api/v1/bids/${selectedBid.id}/match-products`, { method: 'POST' });
-      if (resMatch.ok) {
-        const matchData = await resMatch.json();
-        data.candidate_products = matchData.candidate_products;
-      }
-      setAnalysisData(data);
+      await api.post(`/api/v1/bids/${selectedBid.id}/analyze`);
+      const matchData = await api.post<{ candidate_products: any[] }>(`/api/v1/bids/${selectedBid.id}/match-products`);
+      setAnalysisData((prev) =>
+        prev ? { ...prev, candidate_products: matchData.candidate_products } : prev
+      );
       await refreshAll();
-    } catch {
-      setDrawerError('Unable to reach the analysis endpoint.');
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        setDrawerError('Insufficient permissions to run analysis.');
+      } else {
+        setDrawerError('Unable to reach the analysis endpoint.');
+      }
     } finally {
       setLoadingAnalysis(false);
     }
-  }, [selectedBid, refreshAll]);
+  }, [selectedBid, canRunMatching, refreshAll]);
 
   const handleSubmitReview = useCallback(
     async (bidId: string, decision: 'RELEVANT' | 'NOT_RELEVANT' | 'MAYBE', comments: string) => {
       setReviewError(null);
       try {
-        const res = await fetch(`/api/v1/bids/${bidId}/review`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            relevance_decision: decision,
-            comments: comments.trim() || undefined,
-          }),
+        await api.post(`/api/v1/bids/${bidId}/review`, {
+          relevance_decision: decision,
+          comments: comments.trim() || undefined,
         });
-
-        if (res.ok) {
-          const resReviews = await fetch(`/api/v1/bids/${bidId}/reviews`);
-          if (resReviews.ok) {
-            setBidReviews(await resReviews.json());
-          }
-          fetchNotifications();
-          fetchSummary();
+        const reviews = await api.get<HumanReview[]>(`/api/v1/bids/${bidId}/reviews`);
+        setBidReviews(reviews);
+        fetchNotifications();
+        fetchSummary();
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 403) {
+          setReviewError('Insufficient permissions to submit a review.');
         } else {
-          setReviewError(await readApiError(res, 'Failed to save review decision. Please try again.'));
+          setReviewError('Error connecting to backend API.');
         }
-      } catch {
-        setReviewError('Error connecting to backend API.');
       }
     },
     [fetchNotifications, fetchSummary]
@@ -347,28 +448,57 @@ export default function App() {
 
   const createProduct = useCallback(
     async (payload: { name: string; description: string | null }) => {
-      const res = await fetch('/api/v1/products', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error(await readApiError(res, 'The product could not be created.'));
+      if (!canWriteProducts()) {
+        throw new Error('Creating products requires Operator or Admin role.');
+      }
+      await api.post('/api/v1/products', payload);
       await Promise.all([fetchProducts(), fetchSummary()]);
     },
-    [fetchProducts, fetchSummary]
+    [fetchProducts, fetchSummary, canWriteProducts]
   );
 
-  /**
-   * Remove a product.
-   *
-   * Tries a permanent delete first. The backend refuses (409) when historical
-   * bid analysis references the product, in which case we surface that and let
-   * the operator fall back to deactivation, which is the safe behaviour: the
-   * product stops participating in future matching but its knowledge and all
-   * historical results stay intact.
-   */
+  const addKeyword = useCallback(
+    async (productId: string, payload: { keyword: string; weight?: number; type?: string; active?: boolean }) => {
+      if (!canWriteProducts()) {
+        throw new Error('Adding keywords requires Operator or Admin role.');
+      }
+      await api.post(`/api/v1/products/${productId}/keywords`, payload);
+      await fetchProducts();
+    },
+    [fetchProducts, canWriteProducts]
+  );
+
+  const updateKeyword = useCallback(
+    async (
+      productId: string,
+      keywordId: string,
+      payload: { keyword: string; weight?: number; type?: string; active?: boolean },
+    ) => {
+      if (!canWriteProducts()) {
+        throw new Error('Updating keywords requires Operator or Admin role.');
+      }
+      await api.put(`/api/v1/products/${productId}/keywords/${keywordId}`, payload);
+      await fetchProducts();
+    },
+    [fetchProducts, canWriteProducts]
+  );
+
+  const deleteKeyword = useCallback(
+    async (productId: string, keywordId: string) => {
+      if (!canWriteProducts()) {
+        throw new Error('Deleting keywords requires Operator or Admin role.');
+      }
+      await api.delete(`/api/v1/products/${productId}/keywords/${keywordId}`);
+      await fetchProducts();
+    },
+    [fetchProducts, canWriteProducts]
+  );
+
   const deleteProduct = useCallback(
     async (productId: string): Promise<{ blocked: boolean; message: string }> => {
+      if (!canWriteProducts()) {
+        throw new Error('Deleting products requires Operator or Admin role.');
+      }
       const res = await fetch(`/api/v1/products/${productId}?hard=true`, { method: 'DELETE' });
 
       if (res.ok) {
@@ -377,8 +507,6 @@ export default function App() {
       }
 
       if (res.status === 409) {
-        // Historical analysis references this product. Deactivate instead of
-        // risking the integrity of stored bid analysis records.
         const soft = await fetch(`/api/v1/products/${productId}`, { method: 'DELETE' });
         if (soft.ok) {
           await Promise.all([fetchProducts(), fetchSummary()]);
@@ -396,20 +524,36 @@ export default function App() {
         message: await readApiError(res, 'The product could not be removed. Please try again.'),
       };
     },
-    [fetchProducts, fetchSummary]
+    [fetchProducts, fetchSummary, canWriteProducts]
   );
 
   const reactivateProduct = useCallback(
     async (productId: string) => {
-      const res = await fetch(`/api/v1/products/${productId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ active: true }),
-      });
-      if (!res.ok) throw new Error(await readApiError(res, 'The product could not be reactivated.'));
+      if (!canWriteProducts()) {
+        throw new Error('Reactivating products requires Operator or Admin role.');
+      }
+      await api.put(`/api/v1/products/${productId}`, { active: true });
       await Promise.all([fetchProducts(), fetchSummary()]);
     },
-    [fetchProducts, fetchSummary]
+    [fetchProducts, fetchSummary, canWriteProducts]
+  );
+
+  const handleSyncSource = useCallback(
+    async (sourceId: string) => {
+      if (!canManageSources()) {
+        throw new Error('Source sync requires Operator or Admin role.');
+      }
+      const res = await fetch(`/api/v1/sources/${sourceId}/sync`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Source sync failed.');
+      }
+      await res.json();
+      await Promise.all([fetchBids(), fetchSummary()]);
+    },
+    [fetchBids, fetchSummary, canManageSources]
   );
 
   const closingWindowDays = summary?.metrics.closing_soon_window_days ?? null;
@@ -430,9 +574,11 @@ export default function App() {
           onToggleTheme={toggleTheme}
           onOpenNotifications={() => setIsNotifDrawerOpen(true)}
           notificationCount={notifications.length}
+          user={user}
+          onLogout={logout}
         />
 
-        {globalError && (
+        {globalError && !accessDenied && (
           <div className="global-error-banner">
             <span>{globalError}</span>
             <button className="btn-secondary btn-sm" onClick={refreshAll}>
@@ -441,13 +587,29 @@ export default function App() {
           </div>
         )}
 
-        <main className="page-container">
-          {activeTab === 'dashboard' && (
-            <DashboardView
+        {accessDenied ? (
+          <div
+            className="page-container"
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              minHeight: '55vh',
+              padding: 0,
+            }}
+          >
+            <AccessDenied requiredRole={accessDenied.requiredRole} onBack={clearAccessDenied} />
+          </div>
+        ) : (
+          <main className="page-container">
+            {activeTab === 'dashboard' && (
+              <DashboardView
               summary={summary}
               summaryLoading={loadingSummary}
               onSelectBid={handleSelectBid}
               onNavigateTab={setActiveTab}
+              canRunMatching={canRunMatching}
             />
           )}
 
@@ -488,10 +650,22 @@ export default function App() {
               onCreate={createProduct}
               onDelete={deleteProduct}
               onReactivate={reactivateProduct}
+              onAddKeyword={addKeyword}
+              onUpdateKeyword={updateKeyword}
+              onDeleteKeyword={deleteKeyword}
+              canWriteProducts={canWriteProducts}
             />
           )}
 
           {activeTab === 'ingestion' && <IngestionView onImportSuccess={refreshAll} />}
+
+          {activeTab === 'state-tenders' && (
+            <StateTendersView onSyncSource={handleSyncSource} />
+          )}
+
+          {activeTab === 'state-wise-bids' && (
+            <StateWiseBidsView onSelectBid={handleSelectBid} />
+          )}
 
           {activeTab === 'notifications' && (
             <NotificationsView
@@ -500,7 +674,20 @@ export default function App() {
               onSelectBid={handleSelectBid}
             />
           )}
-        </main>
+
+          {activeTab === 'all-india-matches' && (
+            <AllIndiaMatchesView
+              onSelectBid={handleSelectBid}
+            />
+          )}
+
+          {activeTab === 'scraper-monitoring' && (
+            <SourceMonitoringView
+              canManageSources={canManageSources}
+            />
+          )}
+          </main>
+        )}
       </div>
 
       {selectedBid && (
@@ -514,6 +701,8 @@ export default function App() {
           onRunAnalysis={handleRunAnalysis}
           analysisError={drawerError}
           reviewError={reviewError}
+          canWriteProducts={canWriteProducts}
+          canManageUsers={canManageUsers}
         />
       )}
 
@@ -526,4 +715,44 @@ export default function App() {
       )}
     </div>
   );
+}
+
+/**
+ * Root app — handles the authentication gate.
+ *   - While isLoading: show a session-restore spinner.
+ *   - When unauthenticated: show the Login page.
+ *   - When authenticated: render InnerApp.
+ */
+export default function App() {
+  const { user, isAuthenticated, isLoading, login, logout } = useAuth();
+
+  // If session is still being restored, show a neutral loading state.
+  if (isLoading) {
+    return (
+      <div className="login-page">
+        <div className="login-card">
+          <div className="login-header">
+            <div className="login-logo">
+              <IconShieldCheck size={32} />
+            </div>
+            <h1 className="login-title">SecuredApp</h1>
+            <p className="login-subtitle">Restoring session…</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Not authenticated → show login page.
+  //
+  // Login is self-contained: it renders its own shield/logo, heading,
+  // subtitle, card, fields and buttons. Rendering it directly (without an
+  // outer login-page/login-card/header here) avoids the duplicated branding
+  // that previously appeared twice on the login screen.
+  if (!isAuthenticated) {
+    return <Login onSuccess={() => {}} />;
+  }
+
+  // Authenticated → render the full app.
+  return <InnerApp />;
 }

@@ -617,3 +617,107 @@ def test_knowledge_definitions_cover_every_official_product():
         assert info["keywords"], f"{info['name']} has no keywords"
         assert info["technologies"], f"{info['name']} has no technologies"
         assert info["categories"], f"{info['name']} has no categories"
+
+
+# ---------------------------------------------------------------------------
+# Keyword add / remove / update lifecycle (Issue 3 — Product Keyword Management)
+# ---------------------------------------------------------------------------
+
+def test_keyword_add_then_remove_persists(client, db):
+    """Add a keyword to a product, then remove it — both persist in the DB."""
+    created = client.post("/api/v1/products", json={"name": "KwLifecycleTest", "description": "test"}).json()
+    pid = created["id"]
+
+    # Add keyword
+    add_res = client.post(f"/api/v1/products/{pid}/keywords", json={"keyword": "test keyword alpha", "weight": 1.5, "type": "keyword"})
+    assert add_res.status_code == 201, add_res.text
+    kw_id = add_res.json()["id"]
+
+    # Verify persisted
+    from app.models.product import ProductKeyword
+    from uuid import UUID
+    kw = db.query(ProductKeyword).filter(ProductKeyword.id == kw_id).first()
+    assert kw is not None
+    assert kw.keyword == "test keyword alpha"
+    assert kw.product_id == UUID(pid)
+
+    # Remove keyword
+    del_res = client.delete(f"/api/v1/products/{pid}/keywords/{kw_id}")
+    assert del_res.status_code == 204, del_res.text
+
+    # Verify removed
+    kw_after = db.query(ProductKeyword).filter(ProductKeyword.id == kw_id).first()
+    assert kw_after is None
+
+
+def test_keyword_removal_affects_only_selected_product(client, db):
+    """Removing a keyword from product A must not touch product B's keywords."""
+    pa = client.post("/api/v1/products", json={"name": "KwProductA"}).json()
+    pb = client.post("/api/v1/products", json={"name": "KwProductB"}).json()
+
+    ka = client.post(f"/api/v1/products/{pa['id']}/keywords", json={"keyword": "shared keyword"}).json()
+    kb = client.post(f"/api/v1/products/{pb['id']}/keywords", json={"keyword": "shared keyword"}).json()
+
+    # Remove from A only
+    res = client.delete(f"/api/v1/products/{pa['id']}/keywords/{ka['id']}")
+    assert res.status_code == 204
+
+    # B still has its keyword
+    from app.models.product import ProductKeyword
+    b_kws = db.query(ProductKeyword).filter(ProductKeyword.product_id == pb["id"]).all()
+    assert len(b_kws) == 1
+    assert b_kws[0].keyword == "shared keyword"
+
+    # A has none
+    a_kws = db.query(ProductKeyword).filter(ProductKeyword.product_id == pa["id"]).all()
+    assert len(a_kws) == 0
+
+
+def test_duplicate_keyword_rejection_case_insensitive(client, db):
+    """Adding the same keyword with different case returns 409."""
+    created = client.post("/api/v1/products", json={"name": "KwDupTest"}).json()
+    pid = created["id"]
+
+    assert client.post(f"/api/v1/products/{pid}/keywords", json={"keyword": "Vulnerability Scan"}).status_code == 201
+    assert client.post(f"/api/v1/products/{pid}/keywords", json={"keyword": "vulnerability scan"}).status_code == 409
+    assert client.post(f"/api/v1/products/{pid}/keywords", json={"keyword": "  VULNERABILITY SCAN  "}).status_code == 409
+
+
+def test_update_keyword_endpoint(client, db):
+    """PUT /{product_id}/keywords/{keyword_id} updates the keyword."""
+    created = client.post("/api/v1/products", json={"name": "KwUpdateTest"}).json()
+    pid = created["id"]
+
+    add_res = client.post(f"/api/v1/products/{pid}/keywords", json={"keyword": "old keyword"}).json()
+    kw_id = add_res["id"]
+
+    upd_res = client.put(f"/api/v1/products/{pid}/keywords/{kw_id}", json={"keyword": "new keyword", "weight": 2.0})
+    assert upd_res.status_code == 200, upd_res.text
+    assert upd_res.json()["keyword"] == "new keyword"
+    assert upd_res.json()["weight"] == 2.0
+
+    # Verify persisted
+    from app.models.product import ProductKeyword
+    kw = db.query(ProductKeyword).filter(ProductKeyword.id == kw_id).first()
+    assert kw.keyword == "new keyword"
+    assert kw.weight == 2.0
+
+
+def test_delete_unknown_keyword_returns_404(client, db):
+    """DELETE with a keyword_id not on the product returns 404."""
+    created = client.post("/api/v1/products", json={"name": "Kw404Test"}).json()
+    pid = created["id"]
+
+    missing_kw = "00000000-0000-0000-0000-000000000000"
+    res = client.delete(f"/api/v1/products/{pid}/keywords/{missing_kw}")
+    assert res.status_code == 404, res.text
+    assert "not found" in res.json()["detail"].lower()
+
+
+def test_add_keyword_empty_string_rejected(client, db):
+    """Adding an empty keyword is rejected with 422."""
+    created = client.post("/api/v1/products", json={"name": "KwEmptyTest"}).json()
+    pid = created["id"]
+
+    res = client.post(f"/api/v1/products/{pid}/keywords", json={"keyword": "   "})
+    assert res.status_code == 422, res.text

@@ -27,12 +27,16 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 
+import requests
+from bs4 import BeautifulSoup
+
 from app.services.ingestion.schemas import RawBidRecord
 from app.services.sources.base import (
     BaseSourceAdapter,
     CollectResult,
     ConnectionTestResult,
     SourceConfigError,
+    _allowed_hosts,
     apply_auth,
     clamp_int,
     safe_error,
@@ -686,10 +690,18 @@ class HtmlListingAdapter(BaseSourceAdapter):
         import time as _t
 
         start = _t.perf_counter()
+        row_selector = str(config.get("row_selector") or "").strip()
+        if not row_selector:
+            return ConnectionTestResult(
+                ok=False,
+                message="A CSS row_selector identifying listing rows is required.",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
         try:
             resp = self._safe_fetch(str(config["url"]), session, config)
             soup = self._to_soup(resp.text)
-            rows = soup.select(str(config["row_selector"]))
+            rows = soup.select(row_selector)
             return ConnectionTestResult(
                 ok=True,
                 message=f"Page reachable (HTTP {resp.status_code}); {len(rows)} row(s) matched the selector.",
@@ -812,6 +824,5439 @@ class PlaywrightListingAdapter(HtmlListingAdapter):
 
 
 # ---------------------------------------------------------------------------
+# Arunachal Pradesh e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class ArunachalPradeshTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Arunachal Pradesh e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://bidplus.gem.gov.in/all-bids ... no, https://
+    bidplus.gem.gov.in/all-bids ... no,
+    https://arunachaltenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and corrigendum
+    information.
+    """
+
+    adapter_key = "arunachal_pradesh"
+    adapter_label = "Arunachal Pradesh e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Arunachal Pradesh public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        GeM-style session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GeM-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Arunachal Pradesh",
+                "source_url": detail_url,
+                "source_name": "Arunachal Pradesh e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Chhattisgarh e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class ChhattisgarhTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Chhattisgarh e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://eproc.cgstate.gov.in/ using HTML parsing with BeautifulSoup.
+    Detail pages are fetched using the same requests session to preserve
+    cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and corrigendum
+    information.
+
+    NOTE: The Chhattisgarh e-procurement portal at eproc.cgstate.gov.in
+    redirects to a sign-in page (CHEPS/security/getSignInAction.do) that
+    requires authentication and/or CAPTCHA. Public tender listing pages are
+    not accessible without credentials. Collection will reach the portal
+    but find 0 tender rows. This is expected and not a bypass of any
+    access control.
+    """
+
+    adapter_key = "chhattisgarh"
+    adapter_label = "Chhattisgarh e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Chhattisgarh public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Chhattisgarh",
+                "source_url": detail_url,
+                "source_name": "Chhattisgarh e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Tamil Nadu e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class TamilNaduTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Tamil Nadu e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://tntenders.gov.in/nicgep/app using HTML parsing with BeautifulSoup.
+    Detail pages are fetched using the same requests session to preserve
+    cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and corrigendum
+    information.
+    """
+
+    adapter_key = "tamil_nadu"
+    adapter_label = "Tamil Nadu e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Tamil Nadu public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Tamil Nadu",
+                "source_url": detail_url,
+                "source_name": "Tamil Nadu e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Maharashtra e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class MaharashtraTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Maharashtra e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://mahatenders.gov.in/nicgep/app using HTML parsing with BeautifulSoup.
+    Detail pages are fetched using the same requests session to preserve
+    cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and corrigendum
+    information.
+    """
+
+    adapter_key = "maharashtra"
+    adapter_label = "Maharashtra e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Maharashtra public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Maharashtra",
+                "source_url": detail_url,
+                "source_name": "Maharashtra e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Delhi e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class DelhiTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Delhi e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://govtprocurement.delhi.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session to
+    preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and corrigendum
+    information.
+    """
+
+    adapter_key = "delhi"
+    adapter_label = "Delhi e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Delhi public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of NCT of Delhi",
+                "source_url": detail_url,
+                "source_name": "Delhi e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Rajasthan e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class RajasthanTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Rajasthan e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://eproc.rajasthan.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and corrigendum
+    information.
+    """
+
+    adapter_key = "rajasthan"
+    adapter_label = "Rajasthan e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Rajasthan public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Rajasthan",
+                "source_url": detail_url,
+                "source_name": "Rajasthan e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Madhya Pradesh e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class MadhyaPradeshTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Madhya Pradesh e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://mptenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and corrigendum
+    information.
+    """
+
+    adapter_key = "madhya_pradesh"
+    adapter_label = "Madhya Pradesh e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Madhya Pradesh public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Madhya Pradesh",
+                "source_url": detail_url,
+                "source_name": "Madhya Pradesh e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Odisha e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class OdishaTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Odisha e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://tendersodisha.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and corrigendum
+    information.
+    """
+
+    adapter_key = "odisha"
+    adapter_label = "Odisha e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Odisha public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Odisha",
+                "source_url": detail_url,
+                "source_name": "Odisha e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Punjab e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class PunjabTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Punjab e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://eproc.punjab.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and corrigendum
+    information.
+    """
+
+    adapter_key = "punjab"
+    adapter_label = "Punjab e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Punjab public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Punjab",
+                "source_url": detail_url,
+                "source_name": "Punjab e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Sikkim e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class SikkimTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Sikkim Government Tender Portal.
+
+    Collects bids from the public tender listing page at
+    https://www.sikkim.gov.in/tender using HTML parsing with BeautifulSoup.
+
+    Listing page format: each table row contains a single cell with
+    "Title - Date - Department View" and a link to the tender detail page
+    at /tender/tender-info/{id}?Tender={title}.
+
+    Detail pages contain the tender title, file download link, and tender date.
+    No login or CAPTCHA is required for public access.
+    No pagination controls were found on the listing page (single page).
+    """
+
+    adapter_key = "sikkim"
+    adapter_label = "Sikkim Government Tender Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Sikkim public tender listing.
+
+        Parses the listing table and follows each tender detail link to
+        extract the tender date from the detail page.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("table tr")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                # Skip header row
+                data_rows = rows[1:] if len(rows) > 1 else []
+
+                for row in data_rows:
+                    rec = self._extract_record(row, url, config, http_session)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # No pagination controls found on Sikkim listing page
+                break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(
+        self,
+        row,
+        base_url: str,
+        config: Dict[str, Any],
+        http_session: requests.Session,
+    ) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a Sikkim listing row."""
+        try:
+            cells = row.find_all(["td", "th"])
+            if not cells:
+                return None
+
+            cell_text = cells[0].get_text(" ", strip=True)
+            if not cell_text:
+                return None
+
+            # Find the View link in the row
+            link = row.find("a", href=True)
+            if link is None:
+                return None
+
+            detail_href = link.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            # Parse cell text: "Title - Date - Department View"
+            # Format: "New <title> -<date> - <department> View"
+            title = None
+            closing_date = None
+            department = None
+
+            parts = cell_text.split("-")
+            if len(parts) >= 3:
+                title = parts[0].strip()
+                # Remove "New " prefix if present
+                if title.lower().startswith("new "):
+                    title = title[4:].strip()
+                date_part = parts[1].strip()
+                dept_part = parts[2].strip()
+                # Remove trailing "View" from department
+                if dept_part.lower().endswith("view"):
+                    dept_part = dept_part[:-4].strip()
+                department = dept_part
+                closing_date = date_part if date_part else None
+            else:
+                title = cell_text.strip()
+
+            if not title:
+                return None
+
+            # Fetch detail page to get tender date
+            detail_date = None
+            try:
+                detail_resp = self._safe_fetch(detail_url, http_session, config)
+                detail_soup = self._to_soup(detail_resp.text)
+                detail_text = detail_soup.get_text(" ", strip=True)
+                # Look for "Tender Date: <date>" pattern
+                import re as _re
+                date_match = _re.search(r"Tender Date:\s*\(?([^)]+)\)?", detail_text)
+                if date_match:
+                    detail_date = date_match.group(1).strip()
+            except Exception:  # noqa: BLE001 - detail fetch failure shouldn't lose the record
+                pass
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": detail_href.split("/")[-1].split("?")[0] if detail_href else None,
+                "bid_number": detail_href.split("/")[-1].split("?")[0] if detail_href else None,
+                "title": title,
+                "organisation": "Government of Sikkim",
+                "source_url": detail_url,
+                "source_name": "Sikkim Government Tender Portal",
+                "published_date": detail_date or closing_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": department,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("table tr")
+            data_rows = rows[1:] if len(rows) > 1 else []
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(data_rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Kerala e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class KeralaTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Kerala e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://etenders.kerala.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and corrigendum
+    information.
+    """
+
+    adapter_key = "kerala"
+    adapter_label = "Kerala e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Kerala public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Kerala",
+                "source_url": detail_url,
+                "source_name": "Kerala e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Assam e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class AssamTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Assam e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://assamtenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "assam"
+    adapter_label = "Assam e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Assam public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Assam",
+                "source_url": detail_url,
+                "source_name": "Assam e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Chandigarh e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class ChandigarhTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Chandigarh e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://etenders.chd.nic.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "chandigarh"
+    adapter_label = "Chandigarh e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Chandigarh public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Chandigarh UT Administration",
+                "source_url": detail_url,
+                "source_name": "Chandigarh e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Haryana e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class HaryanaTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Haryana e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://etenders.hry.nic.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "haryana"
+    adapter_label = "Haryana e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Haryana public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        # Use provided session or create a new one for cookie persistence.
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                # Check for next page via pagination controls
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Haryana",
+                "source_url": detail_url,
+                "source_name": "Haryana e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Himachal Pradesh e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class HimachalPradeshTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Himachal Pradesh e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://hptenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "himachal_pradesh"
+    adapter_label = "Himachal Pradesh e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Himachal Pradesh public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Himachal Pradesh",
+                "source_url": detail_url,
+                "source_name": "Himachal Pradesh e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Jammu & Kashmir e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class JammuKashmirTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Jammu & Kashmir e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://jktenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "jammu_kashmir"
+    adapter_label = "Jammu & Kashmir e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Jammu & Kashmir public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Jammu And Kashmir",
+                "source_url": detail_url,
+                "source_name": "Jammu & Kashmir e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Jharkhand e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class JharkhandTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Jharkhand e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://jharkhandtenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "jharkhand"
+    adapter_label = "Jharkhand e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Jharkhand public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Jharkhand",
+                "source_url": detail_url,
+                "source_name": "Jharkhand e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Manipur e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class ManipurTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Manipur e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://manipurtenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "manipur"
+    adapter_label = "Manipur e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Manipur public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Manipur",
+                "source_url": detail_url,
+                "source_name": "Manipur e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Meghalaya e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class MeghalayaTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Meghalaya e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://meghalayatenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "meghalaya"
+    adapter_label = "Meghalaya e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Meghalaya public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Meghalaya",
+                "source_url": detail_url,
+                "source_name": "Meghalaya e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Mizoram e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class MizoramTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Mizoram e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://mizoramtenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "mizoram"
+    adapter_label = "Mizoram e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Mizoram public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Mizoram",
+                "source_url": detail_url,
+                "source_name": "Mizoram e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Nagaland e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class NagalandTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Nagaland e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://nagalandtenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "nagaland"
+    adapter_label = "Nagaland e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Nagaland public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Nagaland",
+                "source_url": detail_url,
+                "source_name": "Nagaland e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Tripura e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class TripuraTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Tripura e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://tripuratenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "tripura"
+    adapter_label = "Tripura e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Tripura public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Tripura",
+                "source_url": detail_url,
+                "source_name": "Tripura e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Uttar Pradesh e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class UttarPradeshTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Uttar Pradesh e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://etender.up.nic.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "uttar_pradesh"
+    adapter_label = "Uttar Pradesh e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Uttar Pradesh public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Uttar Pradesh",
+                "source_url": detail_url,
+                "source_name": "Uttar Pradesh e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Uttarakhand e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class UttarakhandTenderAdapter(BaseSourceAdapter):
+    """Adapter for the Uttarakhand e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://uktenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "uttarakhand"
+    adapter_label = "Uttarakhand e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the Uttarakhand public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of Uttarakhand",
+                "source_url": detail_url,
+                "source_name": "Uttarakhand e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# West Bengal e-Procurement Adapter
+# ---------------------------------------------------------------------------
+class WestBengalTenderAdapter(BaseSourceAdapter):
+    """Adapter for the West Bengal e-Procurement Portal (NIC GePNIC).
+
+    Collects bids from the public listing page at
+    https://wbtenders.gov.in/nicgep/app using HTML parsing with
+    BeautifulSoup. Detail pages are fetched using the same requests session
+    to preserve cookies/session tokens where the portal supports it.
+
+    Listing page columns: Bid Title, Reference No, Closing Date,
+    Bid Opening Date. Detail pages (session-bound) may contain additional
+    fields such as organisation, estimated value, location, and tender ID.
+    """
+
+    adapter_key = "west_bengal"
+    adapter_label = "West Bengal e-Procurement Portal"
+    source_types = ("html_listing",)
+    method = "http"
+    requires_browser = False
+
+    def validate_config(self, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = super().validate_config(config)
+        self._validate_url_field(cfg, "url")
+        return cfg
+
+    def collect(
+        self,
+        config: Dict[str, Any],
+        *,
+        name: str = "",
+        session: Any = None,
+    ) -> CollectResult:
+        """Collect bids from the West Bengal public listing.
+
+        Uses the same requests session for listing and detail pages so that
+        session tokens remain valid across requests within a single
+        collection run.
+        """
+        errors: List[Dict[str, str]] = []
+        records: List[RawBidRecord] = []
+        pages_visited = 0
+
+        url = str(config["url"])
+        max_pages = int(config.get("max_pages") or 1)
+        max_records = int(config.get("max_records") or 0)
+
+        http_session = session if isinstance(session, requests.Session) else requests.Session()
+
+        try:
+            current_url = url
+            for page_num in range(max_pages):
+                try:
+                    resp = self._safe_fetch(current_url, http_session, config)
+                except (BlockedResponseError, UrlNotPermittedError, SafeFetchError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: {exc}"))
+                    break
+
+                if resp.status_code == 404:
+                    errors.append(safe_error("fetch", f"page {page_num + 1}: HTTP 404"))
+                    break
+
+                soup = self._to_soup(resp.text)
+                rows = soup.select("#activeTenders tr[id^='informal']")
+                pages_visited += 1
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    rec = self._extract_record(row, url, config)
+                    if rec is not None:
+                        records.append(rec)
+                        if max_records and len(records) >= max_records:
+                            return CollectResult(
+                                records=records,
+                                pages_visited=pages_visited,
+                                errors=errors,
+                                method="http",
+                            )
+
+                next_selector = str((config.get("pagination") or {}).get("next_selector") or "").strip()
+                if next_selector:
+                    next_anchor = soup.select_one(next_selector)
+                    if next_anchor:
+                        next_href = str(next_anchor.get("href") or "").strip()
+                        if next_href:
+                            current_url = urllib.parse.urljoin(current_url, next_href)
+                            continue
+                    break
+                else:
+                    break
+        except (BlockedResponseError, UrlNotPermittedError):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(safe_error("fetch", str(exc)))
+
+        return CollectResult(
+            records=records,
+            pages_visited=pages_visited,
+            errors=errors,
+            method="http",
+        )
+
+    def _extract_record(self, row, base_url: str, config: Dict[str, Any]) -> Optional[RawBidRecord]:
+        """Extract a single bid record from a GePNIC-style listing row."""
+        try:
+            title_anchor = row.select_one("td a.link2")
+            if title_anchor is None:
+                return None
+
+            title = title_anchor.get_text(" ", strip=True)
+            if not title:
+                return None
+
+            detail_href = title_anchor.get("href", "")
+            detail_url = urllib.parse.urljoin(base_url, detail_href)
+
+            try:
+                validate_public_url(detail_url, allowed_hosts=_allowed_hosts())
+            except UrlNotPermittedError:
+                return None
+
+            cells = row.select("td")
+            if len(cells) < 4:
+                return None
+
+            reference_no = cells[1].get_text(" ", strip=True) if len(cells) > 1 else None
+            closing_date = cells[2].get_text(" ", strip=True) if len(cells) > 2 else None
+            bid_opening_date = cells[3].get_text(" ", strip=True) if len(cells) > 3 else None
+
+            kwargs: Dict[str, Any] = {
+                "gem_bid_id": reference_no,
+                "bid_number": reference_no,
+                "title": title,
+                "organisation": "Government of West Bengal",
+                "source_url": detail_url,
+                "source_name": "West Bengal e-Procurement",
+                "published_date": bid_opening_date,
+                "closing_date": closing_date,
+                "category": None,
+                "department": None,
+                "ministry": None,
+                "location": None,
+                "estimated_value": None,
+                "currency": "INR",
+                "scope_of_work": None,
+                "technical_requirements": None,
+                "eligibility_criteria": None,
+                "qualification_requirements": None,
+                "experience_requirements": None,
+                "certification_requirements": None,
+                "emd_information": None,
+                "tender_fee_information": None,
+                "contact_information": None,
+                "bid_type": None,
+            }
+
+            return RawBidRecord(**kwargs)
+
+        except Exception as exc:  # noqa: BLE001 - one bad row must not lose the page
+            logger.warning(f"Failed to extract bid record from row: {exc}")
+            return None
+
+    def _to_soup(self, markup: str):
+        return BeautifulSoup(markup, "lxml")
+
+    def test_connection(
+        self,
+        config: Dict[str, Any],
+        *,
+        session: Any = None,
+    ) -> ConnectionTestResult:
+        import time as _t
+
+        start = _t.perf_counter()
+        try:
+            resp = self._safe_fetch(str(config["url"]), session, config)
+            soup = self._to_soup(resp.text)
+            rows = soup.select("#activeTenders tr[id^='informal']")
+            return ConnectionTestResult(
+                ok=True,
+                message=(
+                    f"Portal reachable (HTTP {resp.status_code}); "
+                    f"{len(rows)} tender row(s) found."
+                ),
+                http_status=resp.status_code,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+                method="http",
+            )
+        except BlockedResponseError as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Source refused automated collection (HTTP {exc.http_status}).",
+                http_status=exc.http_status,
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except (SafeFetchError, UrlNotPermittedError) as exc:
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectionTestResult(
+                ok=False,
+                message=f"Connection failed: {str(exc)[:200]}",
+                duration_ms=(_t.perf_counter() - start) * 1000.0,
+            )
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 def _allowlist() -> Optional[List[str]]:
@@ -833,6 +6278,31 @@ def all_adapters() -> Dict[str, BaseSourceAdapter]:
             JsonApiAdapter(),
             HtmlListingAdapter(),
             PlaywrightListingAdapter(),
+            ArunachalPradeshTenderAdapter(),
+            ChhattisgarhTenderAdapter(),
+            TamilNaduTenderAdapter(),
+            MaharashtraTenderAdapter(),
+            DelhiTenderAdapter(),
+            RajasthanTenderAdapter(),
+            MadhyaPradeshTenderAdapter(),
+            OdishaTenderAdapter(),
+            PunjabTenderAdapter(),
+            SikkimTenderAdapter(),
+            KeralaTenderAdapter(),
+            AssamTenderAdapter(),
+            ChandigarhTenderAdapter(),
+            HaryanaTenderAdapter(),
+            HimachalPradeshTenderAdapter(),
+            JammuKashmirTenderAdapter(),
+            JharkhandTenderAdapter(),
+            ManipurTenderAdapter(),
+            MeghalayaTenderAdapter(),
+            MizoramTenderAdapter(),
+            NagalandTenderAdapter(),
+            TripuraTenderAdapter(),
+            UttarPradeshTenderAdapter(),
+            UttarakhandTenderAdapter(),
+            WestBengalTenderAdapter(),
         ):
             _ADAPTERS[adapter.adapter_key] = adapter
     return _ADAPTERS

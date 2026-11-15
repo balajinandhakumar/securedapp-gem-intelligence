@@ -12,6 +12,7 @@ A bid that has never been analysed is reported as `analyzed: False` with
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.models.analysis import BidScore
@@ -143,6 +144,8 @@ def serialise_bid(bid: Bid, score: Optional[BidScore]) -> Dict[str, Any]:
         "estimated_value": float(bid.estimated_value) if bid.estimated_value is not None else None,
         "currency": bid.currency,
         "scope_of_work": bid.scope_of_work,
+        "source_url": bid.source_url,
+        "original_bid_url": bid.original_bid_url,
         "analyzed": score is not None,
         "relevance_score": round(score.relevance_score, 3) if score else None,
         "relevance_label": score.relevance_label if score else None,
@@ -161,11 +164,46 @@ def serialise_all_bids(
 
     By default closed bids (past closing_date) are excluded. Set
     ``include_closed=true`` to include closed bids for historical auditing.
+
+    Uses a SQL subquery to fetch only the latest score per bid, avoiding
+    loading all BidScore rows into Python memory (which was prohibitively
+    slow at 43K+ bids).
     """
-    scores = latest_scores(db)
+    # Subquery: latest created_at per bid_id (one row per bid that has scores)
+    latest_subq = (
+        db.query(
+            BidScore.bid_id,
+            func.max(BidScore.created_at).label("max_created"),
+        )
+        .group_by(BidScore.bid_id)
+        .subquery("latest_score")
+    )
+
+    # Join to get the actual latest score row per bid.
+    # Ties on created_at are unlikely (microsecond timestamps); if they occur,
+    # the dict comprehension keeps the last one encountered.
+    scores: Dict[str, BidScore] = {
+        str(s.bid_id): s
+        for s in db.query(BidScore).join(
+            latest_subq,
+            and_(
+                BidScore.bid_id == latest_subq.c.bid_id,
+                BidScore.created_at == latest_subq.c.max_created,
+            ),
+        ).all()
+    }
+
+    now = datetime.now(timezone.utc)
+    open_cond = or_(
+        Bid.closing_date.is_(None),
+        Bid.closing_date >= now,
+    )
+
+    query = db.query(Bid)
+    if not include_closed:
+        query = query.filter(open_cond)
+
     rows = []
-    for bid in db.query(Bid).all():
-        if not include_closed and is_bid_closed(bid):
-            continue
+    for bid in query.all():
         rows.append(serialise_bid(bid, scores.get(str(bid.id))))
     return rows

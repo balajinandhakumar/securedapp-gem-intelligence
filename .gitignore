@@ -51,9 +51,13 @@ pgdata/
 
 # Testing & Coverage
 .pytest_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 .tox/
+test-results/
+coverage/
+.nyc_output/
 
 # Node / Frontend
 node_modules/
@@ -62,6 +66,27 @@ yarn-debug.log*
 yarn-error.log*
 frontend/build/
 frontend/dist/
+playwright-report/
+screenshots/
+vite-*.log
+
+# Logs & temporary runtime artifacts
+*.log
+*.err
+*.shm
+*.wal
+
+# Local data exports & machine-specific files
+1000
+intel_noparam.json
+
+# Local backups (never commit)
+PHASE_6_2_BACKUP/
+
+# Editor backups
+*.bak
+*.bak-*
+*.pre-*.bak
 
 # System
 .DS_Store

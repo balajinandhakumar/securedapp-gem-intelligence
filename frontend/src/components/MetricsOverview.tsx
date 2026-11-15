@@ -17,7 +17,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({ summary, loadi
   if (loading || !summary) {
     return (
       <div className="metrics-row" aria-busy="true">
-        {['Relevant matches', 'Needs review', 'Total bids', 'Closing soon', 'Notifications'].map(
+        {['Relevant matches', 'Needs review', 'Open bids', 'Closing soon', 'Notifications'].map(
           (label) => (
             <div className="kpi-tile" key={label}>
               <div className="kpi-top">
@@ -62,7 +62,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({ summary, loadi
       />
 
       <KpiTile
-        label="Total bids"
+        label="Open bids"
         value={m.total_bids}
         icon={<IconFiles />}
         iconTone="neutral"
@@ -70,9 +70,7 @@ export const MetricsOverview: React.FC<MetricsOverviewProps> = ({ summary, loadi
         sub={
           !hasBids
             ? 'No bids ingested yet'
-            : m.pending_analysis > 0
-              ? `${m.analyzed_bids} analyzed · ${m.pending_analysis} pending`
-              : 'All bids analyzed'
+            : `Open / active bids only · ${m.closed_bids} closed bids excluded`
         }
       />
 

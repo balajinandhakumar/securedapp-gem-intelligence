@@ -8,6 +8,8 @@ import {
   IconDatabase,
   IconHistory,
   IconListSearch,
+  IconMapPin,
+  IconMonitor,
   IconShieldCheck,
 } from './icons';
 
@@ -24,7 +26,11 @@ const RAIL_ITEMS: { id: AppTab; label: string; icon: React.ReactNode }[] = [
   { id: 'recent', label: 'Recent bid intelligence', icon: <IconHistory /> },
   { id: 'products', label: 'Products', icon: <IconBox /> },
   { id: 'ingestion', label: 'Data Source', icon: <IconDatabase /> },
+  { id: 'state-tenders', label: 'State Tenders', icon: <IconBox /> },
+  { id: 'state-wise-bids', label: 'State-wise Bids', icon: <IconListSearch /> },
+  { id: 'all-india-matches', label: 'All India – Product Relevant Bids', icon: <IconMapPin /> },
   { id: 'notifications', label: 'Notifications', icon: <IconBell /> },
+  { id: 'scraper-monitoring', label: 'Scraper & Source Monitoring', icon: <IconMonitor /> },
 ];
 
 /**

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { AnalysisData, Bid, BoqItem, HumanReview } from '../types';
 import { DrawerSkeleton } from './SkeletonLoader';
+import { api } from '../lib/api';
 
 interface BidDetailDrawerProps {
   bid: Bid;
@@ -12,6 +13,8 @@ interface BidDetailDrawerProps {
   onRunAnalysis: () => Promise<void>;
   analysisError: string | null;
   reviewError: string | null;
+  canWriteProducts: () => boolean;
+  canManageUsers: () => boolean;
 }
 
 // Only these states mean the intelligence pipeline actually identified a product
@@ -243,10 +246,14 @@ export const BidDetailDrawer: React.FC<BidDetailDrawerProps> = ({
   onRunAnalysis,
   analysisError,
   reviewError,
+  canWriteProducts,
+  canManageUsers,
 }) => {
   const [reviewDecision, setReviewDecision] = useState<'RELEVANT' | 'NOT_RELEVANT' | 'MAYBE'>('RELEVANT');
   const [comments, setComments]             = useState('');
   const [submitting, setSubmitting]         = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const [pdfError, setPdfError]             = useState<string | null>(null);
 
   // Escape closes the drawer, matching the backdrop click and Close button.
   useEffect(() => {
@@ -265,6 +272,46 @@ export const BidDetailDrawer: React.FC<BidDetailDrawerProps> = ({
       setComments('');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleDownloadPdf = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDownloadingPdf(true);
+    setPdfError(null);
+    try {
+      const res = await fetch(`/api/v1/bids/${bid.id}/download-pdf`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${(JSON.parse(sessionStorage.getItem('securedapp_tokens') || '{}')).access_token ?? ''}`,
+        },
+      });
+      if (!res.ok) {
+        let detail = 'Original PDF not available for this bid.';
+        try {
+          const data = await res.json();
+          if (typeof data?.detail === 'string') detail = data.detail;
+        } catch {
+          /* no JSON body */
+        }
+        throw new Error(detail);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const disposition = res.headers.get('content-disposition') ?? '';
+      const filenameMatch = disposition.match(/filename="([^"]+)"/);
+      a.download = filenameMatch ? filenameMatch[1] : `bid_${bid.gem_bid_id || bid.bid_number || bid.id}_original.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setPdfError(err instanceof Error ? err.message : 'Failed to download the original PDF.');
+    } finally {
+      setDownloadingPdf(false);
     }
   };
 
@@ -311,6 +358,29 @@ export const BidDetailDrawer: React.FC<BidDetailDrawerProps> = ({
                 Open source
               </a>
             )}
+            {/* Prefer original_bid_url; fall back to source_url so the links
+                 render for every bid that has any provenance URL. */}
+            {(bid.original_bid_url || bid.source_url) && (
+              <>
+                <a
+                  className="btn-secondary btn-sm"
+                  href={bid.original_bid_url || bid.source_url!}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={bid.original_bid_url || bid.source_url!}
+                >
+                  View Original Bid
+                </a>
+                <button
+                  className="btn-secondary btn-sm"
+                  onClick={handleDownloadPdf}
+                  disabled={downloadingPdf}
+                  title="Download the original bid document (PDF)"
+                >
+                  {downloadingPdf ? 'Downloading…' : 'Download Bid PDF'}
+                </button>
+              </>
+            )}
             <button className="btn-secondary btn-sm" onClick={onClose} aria-label="Close">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <line x1="18" y1="6" x2="6" y2="18"/>
@@ -326,6 +396,9 @@ export const BidDetailDrawer: React.FC<BidDetailDrawerProps> = ({
           {analysisError && (
             <div className="alert-error">{analysisError}</div>
           )}
+          {pdfError && (
+            <div className="alert-error">{pdfError}</div>
+          )}
 
           {/* No analysis, not loading */}
           {!analysis && !loadingAnalysis && (
@@ -339,9 +412,15 @@ export const BidDetailDrawer: React.FC<BidDetailDrawerProps> = ({
                 className="btn-primary btn-sm"
                 onClick={onRunAnalysis}
                 style={{ marginTop: '0.35rem' }}
+                disabled={!canWriteProducts()}
               >
                 Run Analysis
               </button>
+              {!canWriteProducts() && (
+                <div style={{ marginTop: '0.35rem', color: 'var(--text-muted)', fontSize: '0.72rem' }}>
+                  Running analysis requires Operator or Admin role.
+                </div>
+              )}
             </div>
           )}
 
@@ -662,11 +741,16 @@ export const BidDetailDrawer: React.FC<BidDetailDrawerProps> = ({
                     type="button"
                     className="btn-secondary btn-sm"
                     onClick={onRunAnalysis}
-                    disabled={loadingAnalysis}
+                    disabled={loadingAnalysis || !canWriteProducts()}
                     style={{ width: '100%', justifyContent: 'center', marginTop: '0.5rem' }}
                   >
                     Re-run Analysis
                   </button>
+                  {!canWriteProducts() && (
+                    <div style={{ marginTop: '0.5rem', color: 'var(--text-muted)', fontSize: '0.72rem' }}>
+                      Running analysis requires Operator or Admin role.
+                    </div>
+                  )}
                 </form>
 
                 {/* Review History */}

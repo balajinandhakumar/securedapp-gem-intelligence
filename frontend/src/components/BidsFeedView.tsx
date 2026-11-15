@@ -310,13 +310,15 @@ export const BidsFeedView: React.FC<BidsFeedViewProps> = ({
             <table className="feed-table">
               <thead>
                 <tr>
-                  <th>Bid</th>
-                  <th>Organisation</th>
-                  <th>Product Match</th>
-                  <th>Relevance</th>
-                  <th>Deadline</th>
-                  <th>Opportunity</th>
-                  <th style={{ textAlign: 'right' }}>Action</th>
+                  <th scope="col">Bid</th>
+                  <th scope="col">Organisation</th>
+                  <th scope="col">Product Match</th>
+                  <th scope="col">Relevance</th>
+                  <th scope="col">Deadline</th>
+                  <th scope="col">Opportunity</th>
+                  <th scope="col" style={{ textAlign: 'right' }}>
+                    Action
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -345,6 +347,18 @@ export const BidsFeedView: React.FC<BidsFeedViewProps> = ({
                       <button className="btn-primary btn-sm" onClick={() => onSelectBid(bid.id)}>
                         Inspect →
                       </button>
+                      {(bid.original_bid_url || bid.source_url) && (
+                        <a
+                          className="btn-secondary btn-sm"
+                          href={bid.original_bid_url || bid.source_url!}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={bid.original_bid_url || bid.source_url!}
+                          style={{ marginLeft: '0.35rem' }}
+                        >
+                          View Original
+                        </a>
+                      )}
                     </td>
                   </tr>
                 ))}

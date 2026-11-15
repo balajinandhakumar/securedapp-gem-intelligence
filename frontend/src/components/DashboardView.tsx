@@ -12,6 +12,7 @@ interface DashboardViewProps {
   summaryLoading: boolean;
   onSelectBid: (bidId: string) => void;
   onNavigateTab: (tab: AppTab) => void;
+  canRunMatching: () => boolean;
 }
 
 type DashboardListTab = 'relevant' | 'possible' | 'closing' | 'recent';
@@ -27,6 +28,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   summaryLoading,
   onSelectBid,
   onNavigateTab,
+  canRunMatching,
 }) => {
   const [activeList, setActiveList] = useState<DashboardListTab>('relevant');
   const [tabResolved, setTabResolved] = useState(false);

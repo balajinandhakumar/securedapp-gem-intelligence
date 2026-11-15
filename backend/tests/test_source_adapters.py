@@ -326,7 +326,7 @@ def test_validate_url_field_blocks_localhost():
 
 def test_registry_and_catalog():
     keys = {a.adapter_key for a in all_adapters().values()}
-    assert keys == {"rss_feed", "json_api", "html_listing", "playwright_html"}
+    assert keys == {"rss_feed", "json_api", "html_listing", "playwright_html", "arunachal_pradesh", "chhattisgarh", "tamil_nadu", "maharashtra", "delhi", "rajasthan", "madhya_pradesh", "odisha", "punjab", "sikkim", "kerala", "assam", "chandigarh", "haryana", "himachal_pradesh", "jammu_kashmir", "jharkhand", "manipur", "meghalaya", "mizoram", "nagaland", "tripura", "uttar_pradesh", "uttarakhand", "west_bengal"}
     assert get_adapter("rss_feed").adapter_label
     assert get_adapter_for_source_type("rss").adapter_key == "rss_feed"
     assert get_adapter("nope") is None

@@ -435,8 +435,8 @@ def test_closed_bids_excluded_from_dashboard_counts(client, db):
     body = client.get("/api/v1/dashboard/summary").json()
     metrics = body["metrics"]
 
-    # total_bids counts only open bids (3: two open + one no-deadline)
-    assert metrics["total_bids"] == 3
+    # total_bids counts ALL bids (2 open + 1 closed + 1 no-deadline = 4)
+    assert metrics["total_bids"] == 4
     # closed_bids is tracked separately
     assert metrics["closed_bids"] == 1
     # analyzed_bids counts only open analyzed bids

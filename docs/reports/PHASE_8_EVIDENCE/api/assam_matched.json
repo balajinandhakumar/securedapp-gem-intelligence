@@ -1,0 +1,88 @@
+{
+  "total": 1,
+  "page": 1,
+  "page_size": 10,
+  "total_pages": 1,
+  "bids": [
+    {
+      "id": "88d48b37-42dc-45d0-aeaa-b4e412e53954",
+      "state": "Assam e-Procurement",
+      "state_id": "assam",
+      "source": "Assam e-Procurement",
+      "source_id": "assam",
+      "adapter_key": "assam",
+      "bid_number": "AVS/RFP-EOI/2023/01/142",
+      "gem_bid_id": "AVS/RFP-EOI/2023/01/142",
+      "tender_id": "AVS/RFP-EOI/2023/01/142",
+      "title": "10. Selection of Strategic Consulting Agency for Institutional Strengthening, Financial Structuring and Digital Governance ecosystem for Adarsha Vidyalaya Sangathan, Assam",
+      "organisation": "Government of Assam",
+      "department": null,
+      "matched_product": "SecurePad",
+      "match_state": "NEEDS_REVIEW",
+      "relevance_score": 0.4,
+      "analyzed": true,
+      "estimated_value": null,
+      "currency": "INR",
+      "published_date": "2026-11-24T12:00:00",
+      "closing_date": "2026-11-23T17:00:00",
+      "days_remaining": 13,
+      "deadline_status": "OPEN",
+      "status": "NEW",
+      "matching_status": "COMPLETED",
+      "matched_at": "2026-11-10T11:29:55.021711",
+      "source_url": "https://assamtenders.gov.in/nicgep/app?component=%24DirectLink&page=Home&service=direct&session=T&sp=S2Qhbk4d3iawUhJ2KK9l5mA%3D%3D",
+      "original_bid_url": "https://assamtenders.gov.in/nicgep/app?component=%24DirectLink&page=Home&service=direct&session=T&sp=S2Qhbk4d3iawUhJ2KK9l5mA%3D%3D",
+      "product_matches": [
+        {
+          "product_id": "c8cf9bab-e7c0-4eef-809e-25a1b5048cb8",
+          "product_name": "SecurePad",
+          "match_score": 0.3999,
+          "match_type": "DETERMINISTIC_PHASE3",
+          "confidence": 0.69995,
+          "evidence": {
+            "match_state": "NEEDS_REVIEW",
+            "signals": [
+              {
+                "type": "capability",
+                "text": "Governance",
+                "field": "title",
+                "strength": "STRONG",
+                "weight": 2.7,
+                "snippet": "ning, financial structuring and digital governance ecosystem for adarsha vidyalaya sangath"
+              }
+            ],
+            "score_breakdown": {
+              "field_scores": {
+                "title": 2.7
+              },
+              "signal_scores": [
+                "STRONG"
+              ],
+              "positive_adjustments": 2.7,
+              "negative_exclusion_adjustments": 0,
+              "raw_score": 2.7,
+              "normalized_score": 0.45,
+              "final_relevance_score": 0.4,
+              "classification": "NEEDS_REVIEW",
+              "confidence": 0.7,
+              "scope_gate": null,
+              "reason": "Matched 1 signal(s) across bid fields. Raw score: 2.7, final relevance: 0.45 (POSSIBLE_MATCH). Context gate: insufficient contextual/technical evidence (only ambiguous everyday terms); capped below the match boundary.",
+              "differentiation_adjustments": 0.0,
+              "context_gate": "INSUFFICIENT_CONTEXT"
+            },
+            "reason": "Matched 1 signal(s) across bid fields. Raw score: 2.7, final relevance: 0.45 (POSSIBLE_MATCH). Context gate: insufficient contextual/technical evidence (only ambiguous everyday terms); capped below the match boundary."
+          }
+        }
+      ],
+      "matched_product_count": 1,
+      "product_id": "c8cf9bab-e7c0-4eef-809e-25a1b5048cb8",
+      "match_score": 0.3999,
+      "match_type": "DETERMINISTIC_PHASE3",
+      "confidence": 0.69995,
+      "explanation": "Matched 1 signal(s) across bid fields. Raw score: 2.7, final relevance: 0.45 (POSSIBLE_MATCH). Context gate: insufficient contextual/technical evidence (only ambiguous everyday terms); capped below the match boundary.",
+      "matching_keywords": [
+        ""
+      ]
+    }
+  ]
+}

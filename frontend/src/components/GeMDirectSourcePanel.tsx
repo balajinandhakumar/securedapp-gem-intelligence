@@ -112,15 +112,19 @@ export const GeMDirectSourcePanel: React.FC<GeMDirectSourcePanelProps> = ({ onIm
   const [fetching, setFetching] = useState(false);
   const [result, setResult] = useState<GeMDirectResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
       const res = await fetch('/api/v1/ingestion/gem-direct/status');
       if (res.ok) {
         setStatus(await res.json());
+        setStatusError(null);
+      } else {
+        setStatusError(`Failed to load GeM direct status (HTTP ${res.status}).`);
       }
-    } catch (err) {
-      console.error('Failed to fetch GeM direct collector status', err);
+    } catch {
+      setStatusError('Unable to reach the GeM direct collector status endpoint.');
     }
   }, []);
 
@@ -203,6 +207,11 @@ export const GeMDirectSourcePanel: React.FC<GeMDirectSourcePanelProps> = ({ onIm
               Data Source: <strong>Direct GeM Public Collector</strong>
             </span>
           </div>
+          {statusError && (
+            <div style={{ color: 'var(--accent-red)', marginTop: '0.3rem', fontSize: '0.78rem' }}>
+              {statusError}
+            </div>
+          )}
           <h2 className="panel-title">Data Source: GeM — Direct Public Bid Collector</h2>
           <p className="panel-subtitle" style={{ maxWidth: '680px', lineHeight: 1.45 }}>
             Collects bid records straight from GeM&apos;s own public pages. No third-party tender data provider is

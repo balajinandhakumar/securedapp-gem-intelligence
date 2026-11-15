@@ -10,11 +10,13 @@ from app.models.product import (
 )
 from app.models.collection import CollectionRun, RawBidPayload
 from app.models.source import DataSource, SourceRun
+from app.models.source_discovery import SourceDiscovery
 from app.models.bid import Bid, BidStatusHistory
 from app.models.analysis import BidAnalysis, BidScore, BidProductMatch
 from app.models.review import HumanReview
 from app.models.notification import Notification
 from app.models.audit import AuditLog
+from app.models.token import RevokedToken, LoginAttempt
 
 __all__ = [
     "Base",
@@ -30,6 +32,7 @@ __all__ = [
     "RawBidPayload",
     "DataSource",
     "SourceRun",
+    "SourceDiscovery",
     "Bid",
     "BidStatusHistory",
     "BidAnalysis",
@@ -38,4 +41,6 @@ __all__ = [
     "HumanReview",
     "Notification",
     "AuditLog",
+    "RevokedToken",
+    "LoginAttempt",
 ]

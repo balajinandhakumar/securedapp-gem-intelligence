@@ -1,0 +1,102 @@
+# SecuredApp backend .dockerignore
+# Excludes local/dev artifacts from the backend Docker build context
+
+# --- Version control ---
+.git/
+.gitignore
+
+# --- Environment & secrets ---
+.env
+.env.*
+!.env.example
+backend/.env
+
+# --- Databases & local data ---
+*.sqlite
+*.sqlite3
+*.db
+pgdata/
+data/
+backend/data/
+dev.db*
+test.db*
+test_migration.db
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+.nyc_output/
+
+# --- Logs & runtime artifacts ---
+*.log
+*.err
+*.shm
+*.wal
+
+# --- Local backups ---
+*.bak
+*.bak-*
+*.pre-*.bak
+PHASE_6_2_BACKUP/
+
+# --- System ---
+.DS_Store
+Thumbs.db
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Misc local scripts & audit artifacts (not part of the app) ---
+audit_phase_6_6_*.py
+check_*.py
+fix_*.py
+run_*.py
+test_*.py
+verify_*.py
+inspect_*.py
+investigate_*.py
+list_*.py
+scan_*.py
+continue_*.py
+final_*.py
+fresh_*.py
+matchall_*.py
+state_*.py
+tmpchk.py
+_dbinfo.py
+audit_*.py
+build_*.py
+categorize_*.py
+generate_*.py
+scripts/
+
+# --- frontend (not needed in backend image) ---
+frontend/

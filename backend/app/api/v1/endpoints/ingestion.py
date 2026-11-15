@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.api.v1.dependencies import require_admin, require_operator, require_viewer
 from app.models.collection import CollectionRun, RawBidPayload
+from app.models.user import User
 from app.services.ingestion.gem_direct_service import gem_direct_status_payload
 from app.services.ingestion.pipeline import run_ingestion_pipeline
 from app.services.ingestion.schemas import ImportResult
@@ -72,7 +74,9 @@ def _data_source_status() -> Dict[str, Any]:
 
 
 @router.get("/provider/status", response_model=DataSourceStatusResponse, status_code=status.HTTP_200_OK)
-def get_provider_status_endpoint():
+def get_provider_status_endpoint(
+    current_user: Optional[User] = Depends(require_viewer),
+):
     """
     Returns the current configuration and operational status of the active data
     source, the Direct GeM Public Collector.
@@ -87,6 +91,7 @@ async def import_bids_file(
     file_format: Optional[str] = Form(None),
     allow_update: bool = Form(False),
     db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
 ):
     """
     Ingest bids from an uploaded CSV, XLSX, or JSON file.
@@ -124,14 +129,24 @@ async def import_bids_file(
 
 
 @router.get("/runs", status_code=status.HTTP_200_OK)
-def list_ingestion_runs(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+def list_ingestion_runs(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_viewer),
+):
     """List collection/ingestion audit runs."""
+    limit = min(limit, 1000)
     runs = db.query(CollectionRun).order_by(CollectionRun.started_at.desc()).offset(skip).limit(limit).all()
     return runs
 
 
 @router.get("/runs/{run_id}", status_code=status.HTTP_200_OK)
-def get_ingestion_run(run_id: UUID, db: Session = Depends(get_db)):
+def get_ingestion_run(
+    run_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_viewer),
+):
     """Get detailed information for a specific ingestion run."""
     run = db.query(CollectionRun).filter(CollectionRun.id == run_id).first()
     if not run:

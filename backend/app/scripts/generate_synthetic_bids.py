@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 def generate_synthetic_dataset(output_path: str = "data/sample_bids/synthetic_1000_bids.json"):
     random.seed(42)  # Deterministic seed for reproducible testing
-    base_date = datetime(2026, 9, 20, 10, 0, 0, tzinfo=timezone.utc)
+    base_date = datetime(2026, 11, 1, 10, 0, 0, tzinfo=timezone.utc)
     
     organisations = [
         ("National Smart Grid Mission", "Department of Energy", "Ministry of Power", "New Delhi"),

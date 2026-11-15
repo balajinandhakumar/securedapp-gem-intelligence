@@ -413,7 +413,7 @@ def test_scheduler_is_enabled_by_default():
     from app.core.config import settings
 
     assert settings.GEM_DIRECT_SCHEDULER_ENABLED is True
-    assert settings.GEM_DIRECT_SCHEDULER_INTERVAL_MINUTES == 60
+    assert settings.GEM_DIRECT_SCHEDULER_INTERVAL_MINUTES == 20
 
 
 # --------------------------------------------------------------------------

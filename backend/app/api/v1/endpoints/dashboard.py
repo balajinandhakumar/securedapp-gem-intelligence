@@ -1,5 +1,5 @@
 """
-Read-only dashboard aggregation.
+Read-only dashboard aggregation (optimized).
 
 Every figure returned here is derived from persisted backend data
 (`bids`, `bid_scores`, `notifications`) or from the normalised bid fields
@@ -9,30 +9,64 @@ actually produced.
 
 Bids that have not been through the analysis pipeline yet are reported
 explicitly as `null`/`analyzed: false` rather than being given a score.
+
+Performance approach:
+- All metric counts are computed in SQL via conditional aggregation -- no
+  bid rows are loaded into Python for counting.
+- Lists are bounded with LIMIT and only the required rows are fetched.
+- The latest-score-per-bid subquery avoids loading all BidScore rows.
+- Indexes on bids(closing_date) and bid_scores(bid_id, created_at) support
+  the filters and lookups (see migration 0008).
 """
-from typing import Any, Dict, List
+
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, asc, case, desc, func, or_
+from sqlalchemy.orm import Session, aliased
 
+from app.core.config import settings
 from app.core.database import get_db
+from app.api.v1.dependencies import require_admin, require_operator, require_viewer
 from app.models.bid import Bid
 from app.models.notification import Notification
+from app.models.analysis import BidScore
+from app.models.user import User
 from app.services.bid_views import (
     CLOSING_SOON_DAYS,
     is_bid_closed,
-    latest_scores,
     serialise_bid,
 )
-from app.services.intelligence.matching_engine import classify_score
 
 router = APIRouter()
+
+
+def _band_expression(score_column) -> Any:
+    """Build the SQL CASE expression that mirrors ``classify_score``.
+
+    Honours the configured ``MATCHING_RELEVANCE_THRESHOLD`` when set, falling
+    back to the engine's four-band rule (0.70 / 0.45 / 0.25).
+    """
+    threshold = getattr(settings, "MATCHING_RELEVANCE_THRESHOLD", None)
+    if threshold is not None:
+        return case(
+            (score_column >= threshold, "MATCH"),
+            else_="NO_MATCH",
+        )
+    return case(
+        (score_column >= 0.70, "MATCH"),
+        (score_column >= 0.45, "POSSIBLE_MATCH"),
+        (score_column >= 0.25, "NEEDS_REVIEW"),
+        else_="NO_MATCH",
+    )
 
 
 @router.get("/summary")
 def get_dashboard_summary(
     closing_soon_days: int = CLOSING_SOON_DAYS,
     db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_viewer),
 ):
     """
     Aggregate command-strip metrics and work queues for the main dashboard.
@@ -41,108 +75,262 @@ def get_dashboard_summary(
     fabricates a score. Use `POST /api/v1/bids/{id}/analyze` or the ingestion
     batch pipeline to produce analysis.
     """
-    # Fetch all bids. Closed bids (past closing_date) are preserved in the
-    # database for historical auditing and can appear in the recent_bids feed
-    # with their CLOSED deadline_status, but are excluded from all active
-    # dashboard metrics, active lists (priority_opportunities, possible_matches,
-    # action_required), and notification activity.
-    all_bids = db.query(Bid).all()
-    open_bids = [b for b in all_bids if not is_bid_closed(b)]
-    closed_bid_count = len(all_bids) - len(open_bids)
+    now = datetime.now(timezone.utc)
+    closing_soon_cutoff = now + timedelta(days=closing_soon_days)
 
-    scores = latest_scores(db)
-    # recent_bids includes ALL bids (open and closed) so users can see recent
-    # activity including bids that have since closed.
-    recent_rows = [serialise_bid(b, scores.get(str(b.id))) for b in all_bids]
-    # Active rows exclude closed bids for counts and active lists.
-    active_rows = [serialise_bid(b, scores.get(str(b.id))) for b in open_bids]
-    analyzed_rows = [r for r in active_rows if r["analyzed"]]
-
-    # Buckets come from the engine's single canonical classifier, so the
-    # dashboard honours whatever relevance rule is in force (the four-band rule
-    # when no threshold is configured, or the configured binary cutoff). Using a
-    # second hardcoded 0.70/0.45/0.25 rule here is what previously let a
-    # 0.5-threshold deployment show a MATCH as "possible" on the dashboard.
-    def _band(row: Dict[str, Any]) -> str:
-        return classify_score(row["relevance_score"]) if row["relevance_score"] is not None else "NO_MATCH"
-
-    relevant = [r for r in analyzed_rows if _band(r) == "MATCH"]
-    possible = [r for r in analyzed_rows if _band(r) == "POSSIBLE_MATCH"]
-    needs_review = [r for r in analyzed_rows if _band(r) == "NEEDS_REVIEW"]
-
-    # Closing-soon only includes bids that are still open (not closed).
-    closing_soon = [
-        r
-        for r in active_rows
-        if r["days_remaining"] is not None
-        and 0 <= r["days_remaining"] <= closing_soon_days
-    ]
-
-    notifications = db.query(Notification).all()
-    notification_total = len(notifications)
-
-    def _opportunity_rank(row: Dict[str, Any]):
-        # Deterministic ordering: strongest match first, then value, then the
-        # tightest deadline. Bids that were never analyzed are excluded from
-        # the opportunity ranking because they carry no score to rank by.
-        return (
-            -(row["relevance_score"] or 0.0),
-            -(row["opportunity_score"] or 0.0),
-            row["days_remaining"] if row["days_remaining"] is not None else 10**6,
-        )
-
-    priority_opportunities = sorted(
-        [r for r in relevant if r["relevance_score"] is not None],
-        key=_opportunity_rank,
+    open_cond = or_(
+        Bid.closing_date.is_(None), Bid.closing_date >= now
+    )
+    closed_cond = and_(
+        Bid.closing_date.is_not(None), Bid.closing_date < now
     )
 
-    # Possible matches are genuine pipeline matches that sit just below the
-    # relevant band (0.45-0.70). Surface every active possible match so the
-    # displayed list matches the possible_match_bids count.
-    possible_matches = sorted(possible, key=_opportunity_rank)
+    # ------------------------------------------------------------------
+    # Latest score per bid: one BidScore row per bid (the most recent).
+    # Restricted to open bids only so the subquery scans ~2.8K bids'
+    # scores instead of all 43K+ score rows. Built once and reused by the
+    # counts and the opportunity lists so the CASE band expression is
+    # evaluated once per bid instead of once per persisted score row.
+    # Index-backed join on bid_scores(bid_id, created_at) (migration 0008).
+    # ------------------------------------------------------------------
+    open_bid_ids = [
+        str(bid_id)
+        for (bid_id,) in db.query(Bid.id).filter(open_cond).all()
+    ]
+    if open_bid_ids:
+        latest_subq = (
+            db.query(
+                BidScore.bid_id,
+                func.max(BidScore.created_at).label("max_created"),
+            )
+            .filter(BidScore.bid_id.in_(open_bid_ids))
+            .group_by(BidScore.bid_id)
+            .subquery("latest_score")
+        )
+        latest_scores_q = (
+            db.query(BidScore)
+            .join(
+                latest_subq,
+                and_(
+                    BidScore.bid_id == latest_subq.c.bid_id,
+                    BidScore.created_at == latest_subq.c.max_created,
+                ),
+            )
+            .subquery("ls")
+        )
+        ls = aliased(BidScore, latest_scores_q)
+        band_expr = _band_expression(ls.relevance_score)
+    else:
+        ls = None
+        band_expr = None
 
-    # recent_bids includes ALL bids (open and closed) so users can see recent
-    # activity including bids that have since closed. Closed bids show their
-    # CLOSED deadline_status.
-    recent_bids = sorted(
-        recent_rows,
-        key=lambda r: (r["published_date"] or r["last_updated_at"] or ""),
-        reverse=True,
-    )[:8]
+    # ------------------------------------------------------------------
+    # Metrics: all computed in SQL via conditional aggregation.
+    # ------------------------------------------------------------------
+    counts_query = (
+        db.query(
+            func.count(Bid.id).label("total_bids"),
+            func.count(Bid.id).filter(open_cond).label("open_bids"),
+            func.count(Bid.id).filter(closed_cond).label("closed_bids"),
+        )
+    )
+    if ls is not None:
+        counts_query = counts_query.add_columns(
+            func.count(Bid.id).filter(
+                and_(open_cond, ls.bid_id.is_not(None))
+            ).label("analyzed_bids"),
+            func.count(Bid.id).filter(
+                and_(
+                    open_cond,
+                    ls.bid_id.is_not(None),
+                    band_expr == "MATCH",
+                )
+            ).label("relevant_bids"),
+            func.count(Bid.id).filter(
+                and_(
+                    open_cond,
+                    ls.bid_id.is_not(None),
+                    band_expr == "POSSIBLE_MATCH",
+                )
+            ).label("possible_match_bids"),
+            func.count(Bid.id).filter(
+                and_(
+                    open_cond,
+                    ls.bid_id.is_not(None),
+                    band_expr == "NEEDS_REVIEW",
+                )
+            ).label("needs_review_bids"),
+        )
+    counts_query = counts_query.add_columns(
+        func.count(Bid.id).filter(
+            and_(
+                open_cond,
+                Bid.closing_date.is_not(None),
+                Bid.closing_date >= now,
+                Bid.closing_date <= closing_soon_cutoff,
+            )
+        ).label("closing_soon_bids"),
+    )
+    if ls is not None:
+        counts_query = counts_query.outerjoin(ls, ls.bid_id == Bid.id)
+    counts = counts_query.first()
 
-    # action_required only includes open bids that are closing soon.
-    action_required = sorted(
-        closing_soon,
-        key=lambda r: r["days_remaining"],
-    )[:6]
+    notification_total = db.query(func.count(Notification.id)).scalar()
+
+    total_bids = counts.total_bids or 0
+    open_bids = counts.open_bids or 0
+    closed_bids = counts.closed_bids or 0
+    if ls is not None:
+        analyzed_bids = counts.analyzed_bids or 0
+        relevant_bids = counts.relevant_bids or 0
+        possible_match_bids = counts.possible_match_bids or 0
+        needs_review_bids = counts.needs_review_bids or 0
+    else:
+        analyzed_bids = 0
+        relevant_bids = 0
+        possible_match_bids = 0
+        needs_review_bids = 0
+    closing_soon_bids = counts.closing_soon_bids or 0
+
+    # ------------------------------------------------------------------
+    # Lists: bounded queries, only required rows fetched.
+    # ------------------------------------------------------------------
+
+    # priority_opportunities: open, analyzed, MATCH bids.
+    if ls is not None:
+        opp_rows = (
+            db.query(Bid, ls)
+            .join(ls, ls.bid_id == Bid.id)
+            .filter(
+                open_cond,
+                band_expr == "MATCH",
+            )
+            .order_by(
+                desc(ls.relevance_score),
+                desc(ls.opportunity_score),
+                asc(Bid.closing_date).nullslast(),
+            )
+            .limit(100)
+            .all()
+        )
+        priority_opportunities = [serialise_bid(b, s) for b, s in opp_rows]
+    else:
+        priority_opportunities = []
+
+    # possible_matches: open, analyzed, POSSIBLE_MATCH bids.
+    if ls is not None:
+        possible_rows = (
+            db.query(Bid, ls)
+            .join(ls, ls.bid_id == Bid.id)
+            .filter(
+                open_cond,
+                band_expr == "POSSIBLE_MATCH",
+            )
+            .order_by(
+                desc(ls.relevance_score),
+                desc(ls.opportunity_score),
+                asc(Bid.closing_date).nullslast(),
+            )
+            .limit(100)
+            .all()
+        )
+        possible_matches = [serialise_bid(b, s) for b, s in possible_rows]
+    else:
+        possible_matches = []
+
+    # recent_bids: ALL bids (open and closed), top 8 by published_date desc.
+    recent_bid_rows = (
+        db.query(Bid)
+        .order_by(
+            desc(Bid.published_date).nullslast(),
+            desc(Bid.last_updated_at).nullslast(),
+        )
+        .limit(8)
+        .all()
+    )
+    recent_bid_ids = [str(b.id) for b in recent_bid_rows]
+    recent_scores_map: Dict[str, Any] = {}
+    if recent_bid_ids:
+        for score in (
+            db.query(BidScore)
+            .filter(BidScore.bid_id.in_(recent_bid_ids))
+            .order_by(BidScore.bid_id, BidScore.created_at.desc())
+            .all()
+        ):
+            key = str(score.bid_id)
+            if key not in recent_scores_map:
+                recent_scores_map[key] = score
+    recent_bids = [
+        serialise_bid(b, recent_scores_map.get(str(b.id)))
+        for b in recent_bid_rows
+    ]
+
+    # action_required: open bids closing soon, top 6 by days_remaining asc.
+    # Sorting by closing_date ascending is equivalent to sorting by
+    # days_remaining ascending (earlier deadline = fewer days remaining).
+    if ls is not None:
+        action_rows = (
+            db.query(Bid, ls)
+            .outerjoin(ls, ls.bid_id == Bid.id)
+            .filter(
+                open_cond,
+                Bid.closing_date.is_not(None),
+                Bid.closing_date >= now,
+                Bid.closing_date <= closing_soon_cutoff,
+            )
+            .order_by(asc(Bid.closing_date).nullslast())
+            .limit(6)
+            .all()
+        )
+        action_required = [serialise_bid(b, s) for b, s in action_rows]
+    else:
+        action_required = []
+
+    # recent_activity: top 8 notifications for open bids, by id desc.
+    recent_notifs = (
+        db.query(Notification)
+        .order_by(Notification.id.desc())
+        .limit(8)
+        .all()
+    )
+    notif_bid_ids = {
+        str(n.bid_id) for n in recent_notifs if n.bid_id
+    }
+    bid_map: Dict[str, Any] = {}
+    if notif_bid_ids:
+        bid_map = {
+            str(b.id): b
+            for b in db.query(Bid).filter(Bid.id.in_(notif_bid_ids)).all()
+        }
 
     recent_activity: List[Dict[str, Any]] = []
-    for notif in (
-        db.query(Notification).order_by(Notification.id.desc()).limit(8).all()
-    ):
-        bid = db.get(Bid, notif.bid_id) if notif.bid_id else None
+    for notif in recent_notifs:
+        bid = bid_map.get(str(notif.bid_id)) if notif.bid_id else None
         if bid is None or is_bid_closed(bid):
             continue
-        recent_activity.append({
-            "id": str(notif.id),
-            "bid_id": str(notif.bid_id) if notif.bid_id else None,
-            "bid_title": bid.title if bid else None,
-            "notification_type": notif.notification_type,
-            "channel": notif.channel,
-            "status": notif.status,
-            "recipient": notif.recipient,
-        })
+        recent_activity.append(
+            {
+                "id": str(notif.id),
+                "bid_id": str(notif.bid_id) if notif.bid_id else None,
+                "bid_title": bid.title if bid else None,
+                "notification_type": notif.notification_type,
+                "channel": notif.channel,
+                "status": notif.status,
+                "recipient": notif.recipient,
+            }
+        )
 
     return {
         "metrics": {
-            "total_bids": len(open_bids),
-            "closed_bids": closed_bid_count,
-            "analyzed_bids": len(analyzed_rows),
-            "pending_analysis": len(open_bids) - len(analyzed_rows),
-            "relevant_bids": len(relevant),
-            "possible_match_bids": len(possible),
-            "needs_review_bids": len(needs_review),
-            "closing_soon_bids": len(closing_soon),
+            "total_bids": total_bids,
+            "open_bids": open_bids,
+            "closed_bids": closed_bids,
+            "analyzed_bids": analyzed_bids,
+            "pending_analysis": open_bids - analyzed_bids,
+            "relevant_bids": relevant_bids,
+            "possible_match_bids": possible_match_bids,
+            "needs_review_bids": needs_review_bids,
+            "closing_soon_bids": closing_soon_bids,
             "closing_soon_window_days": closing_soon_days,
             "notifications": notification_total,
         },

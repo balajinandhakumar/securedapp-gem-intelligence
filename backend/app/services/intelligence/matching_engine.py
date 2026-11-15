@@ -180,6 +180,35 @@ _SCOPE_ANCHORS: Dict[str, tuple] = {
     ),
 }
 
+# Domain anchors are product-specific terms that must be present for a bid to
+# be considered genuinely in scope for that product. Generic security terms
+# (e.g. "security audit") shared across the catalogue are NOT sufficient on
+# their own: a bid for "Cyber Security Audit of IT OT Assets" is an ISMS /
+# general IT security tender, not a smart contract audit. When a product has
+# domain anchors configured and none of them appear in the bid text, the
+# normalised score is capped just below the POSSIBLE_MATCH boundary (0.45) so
+# the bid can surface for human review (NEEDS_REVIEW) but is never
+# auto-matched. Products without domain anchors are never domain-gated.
+_DOMAIN_ANCHORS: Dict[str, tuple] = {
+    "SolidityShield": ("smart contract", "solidity", "evm", "reentrancy", "blockchain"),
+    "AuditExpress": (
+        "smart contract", "solidity", "evm",
+        "penetration testing", "vulnerability", "vapt",
+        "security audit", "application security", "web application security",
+        "cyber security", "information security",
+    ),
+    "SecureTrace": ("blockchain", "wallet", "forensic", "tracing", "cryptocurrency"),
+    "SecureWatch": ("blockchain", "smart contract", "transaction monitoring", "token movement"),
+    "SecureX-DID": ("decentralized identity", "did", "verifiable credential", "identity wallet"),
+    "SecureX-ID": ("kyc", "aml", "identity verification", "watchlist", "fraud risk"),
+    "SecurePad": ("web3", "defi", "decentralized finance", "token", "staking", "lending"),
+    "PQCSuite": ("post quantum", "pqc", "quantum resistant", "crypto agility", "cryptographic agility"),
+    "QuantumVault": ("hsm", "hardware security module", "cryptographic key management",
+                      "cryptographic key protection", "key management system"),
+    "SecureCMS": ("consent", "privacy", "data consent"),
+    "CookieHub": ("cookie", "tracking script", "website consent"),
+}
+
 
 def classify_score(score: float, threshold: Optional[float] = None) -> str:
     """Canonical score classification rule for a normalized 0.0-1.0 score.
@@ -278,6 +307,11 @@ class BidMatcherEngine:
         # Apply Product Differentiation pass across pairs
         results = self._apply_product_differentiation(bid_text_map, results)
 
+        # Domain anchor gate: generic catalogue terms alone cannot establish a
+        # bid is genuinely in a product's domain. Cap scores that carry no
+        # product-specific domain anchor.
+        results = self._apply_domain_gate(results, bid_text_map)
+
         # Final evidence-quality gate: differentiation must not be able to lift a
         # bid whose only support is a single ambiguous descriptive term back over
         # the match boundary.
@@ -285,6 +319,57 @@ class BidMatcherEngine:
 
         # Sort by relevance_score descending
         results.sort(key=lambda r: r.relevance_score, reverse=True)
+        return results
+
+    def _apply_domain_gate(
+        self, results: List[ProductMatchResult], text_map: Dict[str, str]
+    ) -> List[ProductMatchResult]:
+        """
+        Cap a product's score when the bid carries none of that product's
+        *domain anchors*.
+
+        Domain anchors are product-specific terms (e.g. "smart contract",
+        "solidity" for SolidityShield; "kyc", "aml" for SecureX-ID) that
+        establish the bid is genuinely in that product's domain. Generic
+        catalogue terms shared across products (e.g. "security audit",
+        "governance", "key management") are NOT domain anchors.
+
+        When a product has domain anchors configured and none appear in the
+        bid text, the normalised score is capped at _UNCONTEXTUAL_CAP (0.3999),
+        just below the POSSIBLE_MATCH boundary (0.45). The bid can still
+        surface for human review as NEEDS_REVIEW but is never auto-matched.
+        Products without domain anchors are never domain-gated.
+        """
+        combined = " ".join(text_map.values())
+        for r in results:
+            if r.relevance_score <= 0.0:
+                continue
+            if r.score_breakdown.get("scope_gate") == "OUT_OF_SCOPE":
+                continue
+            anchors = _DOMAIN_ANCHORS.get(r.product_name)
+            if not anchors:
+                continue
+            if any(
+                text_contains_term(combined, anchor) or text_contains_term(combined, anchor + "s")
+                for anchor in anchors
+            ):
+                continue
+            capped = round(min(r.relevance_score, _UNCONTEXTUAL_CAP), 4)
+            if capped >= r.relevance_score:
+                continue
+            r.relevance_score = capped
+            r.match_state = classify_score(capped)
+            r.confidence = min(1.0, 0.5 + (capped * 0.5))
+            r.reason = (
+                r.reason
+                + " Domain gate: no product-specific domain anchor found in bid text "
+                "(only generic catalogue terms); capped below the match boundary for human review."
+            )
+            r.score_breakdown["domain_gate"] = "NO_DOMAIN_ANCHOR"
+            r.score_breakdown["final_relevance_score"] = round(capped, 3)
+            r.score_breakdown["classification"] = r.match_state
+            r.score_breakdown["confidence"] = round(r.confidence, 3)
+            r.score_breakdown["reason"] = r.reason
         return results
 
     def _dedupe_field_texts(self, text_map: Dict[str, str]) -> Dict[str, str]:

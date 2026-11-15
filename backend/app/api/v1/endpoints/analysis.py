@@ -8,10 +8,12 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.api.v1.dependencies import require_admin, require_operator, require_viewer
 from app.models.analysis import BidAnalysis, BidScore, BidProductMatch
 from app.models.bid import Bid
 from app.models.notification import Notification
 from app.models.review import HumanReview
+from app.models.user import User
 from app.schemas.notification import NotificationResponse
 from app.services.bid_views import is_bid_closed
 from app.services.intelligence import (
@@ -61,7 +63,11 @@ class HumanReviewCreate(BaseModel):
 
 
 @router.post("/bids/{bid_id}/analyze", status_code=status.HTTP_200_OK)
-def analyze_bid_full(bid_id: UUID, db: Session = Depends(get_db)):
+def analyze_bid_full(
+    bid_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
+):
     """
     Run full Phase 4 Bid Intelligence & Opportunity Analysis pipeline for a bid.
     """
@@ -156,7 +162,11 @@ def analyze_bid_full(bid_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.get("/bids/{bid_id}/analysis", status_code=status.HTTP_200_OK)
-def get_bid_analysis(bid_id: UUID, db: Session = Depends(get_db)):
+def get_bid_analysis(
+    bid_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_viewer),
+):
     """Retrieve existing analysis and scores for a bid."""
     bid = db.get(Bid, bid_id)
     if not bid:
@@ -171,7 +181,12 @@ def get_bid_analysis(bid_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.post("/bids/{bid_id}/review", status_code=status.HTTP_201_CREATED)
-def submit_human_review(bid_id: UUID, review_in: HumanReviewCreate, db: Session = Depends(get_db)):
+def submit_human_review(
+    bid_id: UUID,
+    review_in: HumanReviewCreate,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
+):
     """Submit a human review decision (relevant / irrelevant / uncertain).
 
     Validation happens in :class:`HumanReviewCreate`. An identical
@@ -210,14 +225,21 @@ def submit_human_review(bid_id: UUID, review_in: HumanReviewCreate, db: Session 
 
 
 @router.get("/bids/{bid_id}/reviews", status_code=status.HTTP_200_OK)
-def get_human_reviews(bid_id: UUID, db: Session = Depends(get_db)):
+def get_human_reviews(
+    bid_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_viewer),
+):
     """Get audit history of human reviews for a bid."""
     reviews = db.query(HumanReview).filter(HumanReview.bid_id == bid_id).order_by(HumanReview.reviewed_at.desc()).all()
     return reviews
 
 
 @router.get("/notifications", response_model=List[NotificationResponse], status_code=status.HTTP_200_OK)
-def list_notifications(db: Session = Depends(get_db)):
+def list_notifications(
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_viewer),
+):
     """
     List notification logs with an explicit delivery status.
 
@@ -251,6 +273,7 @@ def list_notifications(db: Session = Depends(get_db)):
 def dispatch_queued_notifications(
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
 ):
     """
     Attempt delivery of up to ``limit`` queued EMAIL notifications.
@@ -265,7 +288,11 @@ def dispatch_queued_notifications(
 
 
 @router.post("/notifications/{notification_id}/deliver", status_code=status.HTTP_200_OK)
-def deliver_notification(notification_id: UUID, db: Session = Depends(get_db)):
+def deliver_notification(
+    notification_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
+):
     """
     Send or retry one notification through the configured provider.
 
@@ -285,7 +312,10 @@ def deliver_notification(notification_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.get("/analytics/evaluation", status_code=status.HTTP_200_OK)
-def get_evaluation_metrics(db: Session = Depends(get_db)):
+def get_evaluation_metrics(
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_viewer),
+):
     """
     Compare the matching engine's relevance predictions against validated human
     review labels.

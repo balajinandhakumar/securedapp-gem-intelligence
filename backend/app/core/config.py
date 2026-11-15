@@ -34,6 +34,31 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     SECRET_KEY: str = "dev_secret_key_securedapp_gem_bid_intelligence_2026_key"
 
+    # ------------------------------------------------------------------
+    # Authentication (Task A)
+    # ------------------------------------------------------------------
+    # JWT algorithm and token lifetimes. Access tokens are short-lived;
+    # refresh tokens are longer-lived and are used only to obtain new
+    # access tokens.
+    AUTH_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    # When True, all endpoints protected by require_auth / require_admin
+    # / require_operator reject unauthenticated requests with 401. Defaults
+    # to False for backward compatibility with existing unauthenticated
+    # callers; production deployments MUST set this to True.
+    AUTH_REQUIRED: bool = False
+
+    # Brute-force protection (Task A).
+    LOGIN_MAX_ATTEMPTS: int = 5
+    LOGIN_LOCKOUT_MINUTES: int = 15
+
+    # Rate limiting (Task E).
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60
+    RATE_LIMIT_BURST: int = 10
+
     # Database URLs
     DATABASE_URL: str = "sqlite:///./dev.db"
     TEST_DATABASE_URL: str = "sqlite:///./test.db"
@@ -77,7 +102,7 @@ class Settings(BaseSettings):
     # per interval: bounded by GEM_DIRECT_MAX_PAGES, never overlapping a
     # manual fetch, one attempt per tick (no retry storms).
     GEM_DIRECT_SCHEDULER_ENABLED: bool = True
-    GEM_DIRECT_SCHEDULER_INTERVAL_MINUTES: int = 60
+    GEM_DIRECT_SCHEDULER_INTERVAL_MINUTES: int = 20
     GEM_DIRECT_USER_AGENT: str = "SecuredApp-GeM-Intelligence/1.0"
 
     # ------------------------------------------------------------------
@@ -135,6 +160,20 @@ class Settings(BaseSettings):
     # the checkpoint still only ever advances forward. 0 resumes exactly at
     # next_page. Capped below the batch size so a batch always makes progress.
     GEM_COLLECT_OVERLAP_PAGES: int = 5
+
+    # Automatic checkpoint resume for the direct GeM collector.
+    # When enabled and no explicit start_page is supplied, the collector
+    # resumes from the last successfully completed page recorded in the
+    # most recent CollectionRun notes. Disabled by default so manual runs
+    # always start from page 1 unless the caller opts in.
+    GEM_DIRECT_AUTO_RESUME: bool = False
+
+    # Scheduler stop timeout in seconds. How long stop() waits for an
+    # in-progress collection to finish before returning. Long-running
+    # collections (e.g. 250 pages at 3s/page = 750s) need more than the
+    # default 15s. The thread is daemon, so the process will still exit,
+    # but a longer timeout allows graceful completion.
+    GEM_DIRECT_SCHEDULER_STOP_TIMEOUT: float = 60.0
     # Scope of the public listing, exactly as GeM's own tabs define it:
     # ongoing_bids | bidrastatus | cancelled_bids
     GEM_DIRECT_BID_STATUS_TYPE: str = "ongoing_bids"
@@ -166,6 +205,22 @@ class Settings(BaseSettings):
     # failure is recorded and never removes the listing bid.
     GEM_DIRECT_ENRICH_DETAIL_PAGES: bool = False
     GEM_DIRECT_MAX_DETAIL_PAGES: int = 20
+
+    # Document-aware extraction for GeM bid documents (PDF downloads served at
+    # showbidDocument/<id> URLs). The existing detail-enrichment path tried to
+    # render these as HTML in Playwright, which fails because GeM serves them
+    # as file downloads. When enabled, the collector downloads the PDF over
+    # plain HTTP, extracts its text with pypdf, and maps the extracted content
+    # into the canonical bid fields used by the existing matching engine.
+    # Off by default: listing data alone is sufficient to persist a bid, and
+    # document extraction performs per-bid network calls.
+    GEM_DIRECT_DOC_EXTRACTION_ENABLED: bool = False
+    # Maximum document size in MB before extraction is refused.
+    GEM_DIRECT_MAX_DOC_SIZE_MB: int = 10
+    # Per-document fetch timeout in seconds.
+    GEM_DIRECT_DOC_FETCH_TIMEOUT_SECONDS: float = 30.0
+    # Maximum PDF pages to read for text extraction (0 = no limit).
+    GEM_DIRECT_MAX_DOC_PAGES: int = 0
 
     # BoQ (Bill of Quantities) evidence enrichment. The public listing truncates
     # the item list to ~99 chars, so the full line items are fetched separately
@@ -213,10 +268,14 @@ class Settings(BaseSettings):
     # can be added from the Data Source UI and persist in the source registry.
     # Every outbound request goes through the SSRF-safe transport and any
     # credential a source needs is referenced by environment-variable name.
-    # Scheduled collection is OFF by default: no live sync ever runs during
-    # development or automated testing until an operator enables it.
+    # Scheduled collection is ON by default in production: automatic per-source
+    # collection runs once per tick, checking which enabled sources are due.
+    # Safe defaults: 60-second tick, 5-minute minimum interval between runs of
+    # the same source (MIN_INTERVAL_SECONDS in scheduler.py), per-source locks
+    # to prevent concurrent manual+scheduler collection, and per-source try/except
+    # so one blocked portal never stops the others.
     # ------------------------------------------------------------------
-    SOURCE_SCHEDULER_ENABLED: bool = False
+    SOURCE_SCHEDULER_ENABLED: bool = True
     SOURCE_SCHEDULER_TICK_SECONDS: int = 60
     # Optional comma-separated host allowlist for ALL configured sources.
     # Empty = any public host is permitted (still blocked from private /
@@ -324,12 +383,25 @@ class Settings(BaseSettings):
         default_secret = (
             "dev_secret_key_securedapp_gem_bid_intelligence_2026_key"
         )
-        if self.ENVIRONMENT == "production" and self.SECRET_KEY == default_secret:
-            raise ValueError(
-                "SECRET_KEY must not be the development default when "
-                "ENVIRONMENT=production. Set SECRET_KEY to a strong random "
-                "value (32+ bytes) via environment variable or secret manager."
-            )
+        if self.ENVIRONMENT == "production":
+            if self.SECRET_KEY == default_secret:
+                raise ValueError(
+                    "SECRET_KEY must not be the development default when "
+                    "ENVIRONMENT=production. Set SECRET_KEY to a strong random "
+                    "value (32+ bytes) via environment variable or secret manager."
+                )
+            if len(self.SECRET_KEY) < 32:
+                raise ValueError(
+                    "SECRET_KEY must be at least 32 characters when "
+                    "ENVIRONMENT=production. Set SECRET_KEY via environment "
+                    "variable or secret manager."
+                )
+            if not self.AUTH_REQUIRED:
+                raise ValueError(
+                    "AUTH_REQUIRED must be True when ENVIRONMENT=production. "
+                    "Set AUTH_REQUIRED=true to enforce authentication on "
+                    "protected endpoints."
+                )
         return self
 
     model_config = SettingsConfigDict(

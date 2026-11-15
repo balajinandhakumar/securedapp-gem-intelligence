@@ -1,0 +1,244 @@
+{
+  "total": 2,
+  "page": 1,
+  "page_size": 10,
+  "total_pages": 1,
+  "bids": [
+    {
+      "id": "1003c57a-7956-4397-8541-9e559b170dd3",
+      "state": "Punjab e-Procurement",
+      "state_id": "punjab",
+      "source": "Punjab e-Procurement",
+      "source_id": "punjab",
+      "adapter_key": "punjab",
+      "bid_number": "MO/2026-27/01",
+      "gem_bid_id": "MO/2026-27/01",
+      "tender_id": "MO/2026-27/01",
+      "title": "7. Tender for hiring Consultancy for Maintenance of the existing Information Security Management System (ISMS) in accordance with ISO/IEC 27001 2022, Support for Surveillance Audits, Cyber Security Audit of IT OT Assets etc.",
+      "organisation": "Government of Punjab",
+      "department": null,
+      "matched_product": "SolidityShield",
+      "match_state": "POSSIBLE_MATCH",
+      "relevance_score": 0.5,
+      "analyzed": true,
+      "estimated_value": null,
+      "currency": "INR",
+      "published_date": "2026-11-20T11:00:00",
+      "closing_date": "2026-11-19T11:30:00",
+      "days_remaining": 8,
+      "deadline_status": "OPEN",
+      "status": "NEW",
+      "matching_status": "COMPLETED",
+      "matched_at": "2026-11-05T12:10:26.693674",
+      "source_url": "https://eproc.punjab.gov.in/nicgep/app?component=%24DirectLink&page=Home&service=direct&session=T&sp=SP09UXB7wKlmOvAnYG8dwSQ%3D%3D",
+      "original_bid_url": "https://eproc.punjab.gov.in/nicgep/app?component=%24DirectLink&page=Home&service=direct&session=T&sp=SP09UXB7wKlmOvAnYG8dwSQ%3D%3D",
+      "product_matches": [
+        {
+          "product_id": "d8367c48-60f8-40cd-a049-2cf84d3b3fb6",
+          "product_name": "SolidityShield",
+          "match_score": 0.5,
+          "match_type": "DETERMINISTIC_PHASE3",
+          "confidence": 0.75,
+          "evidence": {
+            "match_state": "POSSIBLE_MATCH",
+            "signals": [
+              {
+                "type": "positive_signal",
+                "text": "security audit",
+                "field": "title",
+                "strength": "STRONG",
+                "weight": 3.0,
+                "snippet": "support for surveillance audits, cyber security audit of it ot assets etc."
+              }
+            ],
+            "score_breakdown": {
+              "field_scores": {
+                "title": 3.0
+              },
+              "signal_scores": [
+                "STRONG"
+              ],
+              "positive_adjustments": 3.0,
+              "negative_exclusion_adjustments": 0,
+              "raw_score": 3.0,
+              "normalized_score": 0.5,
+              "final_relevance_score": 0.5,
+              "classification": "POSSIBLE_MATCH",
+              "confidence": 0.75,
+              "scope_gate": null,
+              "reason": "Matched 1 signal(s) across bid fields. Raw score: 3.0, final relevance: 0.5 (POSSIBLE_MATCH).",
+              "differentiation_adjustments": 0.0
+            },
+            "reason": "Matched 1 signal(s) across bid fields. Raw score: 3.0, final relevance: 0.5 (POSSIBLE_MATCH)."
+          }
+        },
+        {
+          "product_id": "f4ca61a0-09ff-4b1f-be66-1018d7431253",
+          "product_name": "AuditExpress",
+          "match_score": 0.5,
+          "match_type": "DETERMINISTIC_PHASE3",
+          "confidence": 0.75,
+          "evidence": {
+            "match_state": "POSSIBLE_MATCH",
+            "signals": [
+              {
+                "type": "positive_signal",
+                "text": "security audit",
+                "field": "title",
+                "strength": "STRONG",
+                "weight": 3.0,
+                "snippet": "support for surveillance audits, cyber security audit of it ot assets etc."
+              }
+            ],
+            "score_breakdown": {
+              "field_scores": {
+                "title": 3.0
+              },
+              "signal_scores": [
+                "STRONG"
+              ],
+              "positive_adjustments": 3.0,
+              "negative_exclusion_adjustments": 0,
+              "raw_score": 3.0,
+              "normalized_score": 0.5,
+              "final_relevance_score": 0.5,
+              "classification": "POSSIBLE_MATCH",
+              "confidence": 0.75,
+              "scope_gate": null,
+              "reason": "Matched 1 signal(s) across bid fields. Raw score: 3.0, final relevance: 0.5 (POSSIBLE_MATCH).",
+              "differentiation_adjustments": 0.0
+            },
+            "reason": "Matched 1 signal(s) across bid fields. Raw score: 3.0, final relevance: 0.5 (POSSIBLE_MATCH)."
+          }
+        }
+      ],
+      "matched_product_count": 2,
+      "product_id": "d8367c48-60f8-40cd-a049-2cf84d3b3fb6",
+      "match_score": 0.5,
+      "match_type": "DETERMINISTIC_PHASE3",
+      "confidence": 0.75,
+      "explanation": "Matched 1 signal(s) across bid fields. Raw score: 3.0, final relevance: 0.5 (POSSIBLE_MATCH).",
+      "matching_keywords": [
+        ""
+      ]
+    },
+    {
+      "id": "1003c57a-7956-4397-8541-9e559b170dd3",
+      "state": "Punjab e-Procurement",
+      "state_id": "punjab",
+      "source": "Punjab e-Procurement",
+      "source_id": "punjab",
+      "adapter_key": "punjab",
+      "bid_number": "MO/2026-27/01",
+      "gem_bid_id": "MO/2026-27/01",
+      "tender_id": "MO/2026-27/01",
+      "title": "7. Tender for hiring Consultancy for Maintenance of the existing Information Security Management System (ISMS) in accordance with ISO/IEC 27001 2022, Support for Surveillance Audits, Cyber Security Audit of IT OT Assets etc.",
+      "organisation": "Government of Punjab",
+      "department": null,
+      "matched_product": "AuditExpress",
+      "match_state": "POSSIBLE_MATCH",
+      "relevance_score": 0.5,
+      "analyzed": true,
+      "estimated_value": null,
+      "currency": "INR",
+      "published_date": "2026-11-20T11:00:00",
+      "closing_date": "2026-11-19T11:30:00",
+      "days_remaining": 8,
+      "deadline_status": "OPEN",
+      "status": "NEW",
+      "matching_status": "COMPLETED",
+      "matched_at": "2026-11-05T12:10:26.693674",
+      "source_url": "https://eproc.punjab.gov.in/nicgep/app?component=%24DirectLink&page=Home&service=direct&session=T&sp=SP09UXB7wKlmOvAnYG8dwSQ%3D%3D",
+      "original_bid_url": "https://eproc.punjab.gov.in/nicgep/app?component=%24DirectLink&page=Home&service=direct&session=T&sp=SP09UXB7wKlmOvAnYG8dwSQ%3D%3D",
+      "product_matches": [
+        {
+          "product_id": "d8367c48-60f8-40cd-a049-2cf84d3b3fb6",
+          "product_name": "SolidityShield",
+          "match_score": 0.5,
+          "match_type": "DETERMINISTIC_PHASE3",
+          "confidence": 0.75,
+          "evidence": {
+            "match_state": "POSSIBLE_MATCH",
+            "signals": [
+              {
+                "type": "positive_signal",
+                "text": "security audit",
+                "field": "title",
+                "strength": "STRONG",
+                "weight": 3.0,
+                "snippet": "support for surveillance audits, cyber security audit of it ot assets etc."
+              }
+            ],
+            "score_breakdown": {
+              "field_scores": {
+                "title": 3.0
+              },
+              "signal_scores": [
+                "STRONG"
+              ],
+              "positive_adjustments": 3.0,
+              "negative_exclusion_adjustments": 0,
+              "raw_score": 3.0,
+              "normalized_score": 0.5,
+              "final_relevance_score": 0.5,
+              "classification": "POSSIBLE_MATCH",
+              "confidence": 0.75,
+              "scope_gate": null,
+              "reason": "Matched 1 signal(s) across bid fields. Raw score: 3.0, final relevance: 0.5 (POSSIBLE_MATCH).",
+              "differentiation_adjustments": 0.0
+            },
+            "reason": "Matched 1 signal(s) across bid fields. Raw score: 3.0, final relevance: 0.5 (POSSIBLE_MATCH)."
+          }
+        },
+        {
+          "product_id": "f4ca61a0-09ff-4b1f-be66-1018d7431253",
+          "product_name": "AuditExpress",
+          "match_score": 0.5,
+          "match_type": "DETERMINISTIC_PHASE3",
+          "confidence": 0.75,
+          "evidence": {
+            "match_state": "POSSIBLE_MATCH",
+            "signals": [
+              {
+                "type": "positive_signal",
+                "text": "security audit",
+                "field": "title",
+                "strength": "STRONG",
+                "weight": 3.0,
+                "snippet": "support for surveillance audits, cyber security audit of it ot assets etc."
+              }
+            ],
+            "score_breakdown": {
+              "field_scores": {
+                "title": 3.0
+              },
+              "signal_scores": [
+                "STRONG"
+              ],
+              "positive_adjustments": 3.0,
+              "negative_exclusion_adjustments": 0,
+              "raw_score": 3.0,
+              "normalized_score": 0.5,
+              "final_relevance_score": 0.5,
+              "classification": "POSSIBLE_MATCH",
+              "confidence": 0.75,
+              "scope_gate": null,
+              "reason": "Matched 1 signal(s) across bid fields. Raw score: 3.0, final relevance: 0.5 (POSSIBLE_MATCH).",
+              "differentiation_adjustments": 0.0
+            },
+            "reason": "Matched 1 signal(s) across bid fields. Raw score: 3.0, final relevance: 0.5 (POSSIBLE_MATCH)."
+          }
+        }
+      ],
+      "matched_product_count": 2,
+      "product_id": "f4ca61a0-09ff-4b1f-be66-1018d7431253",
+      "match_score": 0.5,
+      "match_type": "DETERMINISTIC_PHASE3",
+      "confidence": 0.75,
+      "explanation": "Matched 1 signal(s) across bid fields. Raw score: 3.0, final relevance: 0.5 (POSSIBLE_MATCH).",
+      "matching_keywords": [
+        ""
+      ]
+    }
+  ]
+}

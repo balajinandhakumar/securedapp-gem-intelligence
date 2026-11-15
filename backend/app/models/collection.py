@@ -21,6 +21,7 @@ class CollectionRun(Base):
     notes = Column(Text(), nullable=True)
 
     raw_payloads = relationship("RawBidPayload", back_populates="collection_run", cascade="all, delete-orphan")
+    source_discoveries = relationship("SourceDiscovery", back_populates="collection_run", cascade="all, delete-orphan")
 
 
 class RawBidPayload(Base):

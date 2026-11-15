@@ -227,3 +227,101 @@ All required frontend fixes are implemented and verified:
 - ✅ Documentation updated
 
 **Final project readiness verdict:** The frontend fixes are complete and verified. The application is functionally correct for the addressed issues. The codebase is ready for production deployment subject to standard review processes. No critical blockers remain.
+
+---
+
+## 13. Docker Compose Verification (Phase 8)
+
+### 13.1 Docker Configuration Corrections
+
+| Issue | Correction | File |
+|-------|-----------|------|
+| PostgreSQL exposed to host (port 5432:5432) | Removed `ports` mapping — DB accessible only via internal Docker network | `docker-compose.yml` |
+| Insecure `POSTGRES_PASSWORD` fallback (`securedapp_pass`) | Changed to required variable (`${POSTGRES_PASSWORD:?...}`) — no fallback | `docker-compose.yml` |
+| Insecure `POSTGRES_USER`/`POSTGRES_DB` fallbacks | Changed to required variables — no fallbacks | `docker-compose.yml` |
+| Insecure `DATABASE_URL` fallback with embedded password | Changed to required variable — no fallback | `docker-compose.yml` |
+| `--spider` flag in health checks (wget can't connect via `localhost` inside container) | Changed to `-q -O /dev/null` with `127.0.0.1` | `docker-compose.yml` |
+| `localhost` in health checks doesn't resolve inside container | Changed to `127.0.0.1` | `docker-compose.yml` |
+| Missing `pyjwt` dependency (JWT auth) | Added `pyjwt>=2.8.0` | `backend/requirements.txt` |
+| Missing `beautifulsoup4` dependency (source adapters) | Added `beautifulsoup4>=4.12.0` | `backend/requirements.txt` |
+| Missing `email-validator` dependency (pydantic EmailStr) | Added `email-validator>=2.2.0` | `backend/requirements.txt` |
+| Removed `playwright` from backend deps (not needed for runtime) | Removed `playwright>=1.44.0` | `backend/requirements.txt` |
+| `wget` not in Python slim image (needed for healthcheck) | Added `wget` to runtime apt-get install | `backend/Dockerfile` |
+| `GUID()` resolves to UUID on PG but migrations use CHAR(36) | Changed `GUID.load_dialect_impl` to always return CHAR(36) | `backend/app/models/base_mixins.py` |
+| `seed.py` called `Base.metadata.create_all()` conflicting with migrations | Removed `create_all()` call — alembic handles schema | `backend/app/seed.py` |
+| Migration `0009` created duplicate `idx_bids_closing_date` | Removed duplicate index creation (already in 0008) | `backend/alembic/versions/0009_dashboard_indexes_part2.py` |
+| Migration `0011` FK `source_id` UUID vs `data_sources.id` CHAR(36) | Removed FK constraint from migration | `backend/alembic/versions/0011_bid_source_id.py` |
+
+### 13.2 New Files Created
+
+| File | Purpose |
+|------|---------|
+| `.env.docker` | Docker Compose production environment file (PostgreSQL, Redis, strong SECRET_KEY, AUTH_REQUIRED=true, ENVIRONMENT=production) |
+| `frontend/Dockerfile` | Pre-built dist served by nginx:1.27-alpine |
+| `.dockerignore` (updated) | Excludes `frontend/dist/` from being ignored (needed for COPY) |
+
+### 13.3 Docker Compose Security Properties
+
+| Property | Status | Verification |
+|----------|--------|--------------|
+| PostgreSQL not exposed to host | ✅ | No `ports` mapping on `db` service; only `5432/tcp` internal |
+| PostgreSQL accessible to backend | ✅ | Via internal Docker network (`db:5432`) |
+| Persistent volume configured | ✅ | `postgres_data` volume on `/var/lib/postgresql/data` |
+| SECRET_KEY supplied explicitly | ✅ | Required via `${SECRET_KEY}` — no insecure fallback |
+| POSTGRES_PASSWORD no insecure fallback | ✅ | Required via `${POSTGRES_PASSWORD:?...}` |
+| AUTH_REQUIRED=true | ✅ | Set in `.env.docker` |
+| ENVIRONMENT=production | ✅ | Set in `.env.docker` |
+| Real .env files not copied into images | ✅ | `.env` files are gitignored and not in Docker context |
+| Frontend build args don't expose secrets | ✅ | Frontend Dockerfile copies pre-built `dist` (no build args) |
+| No hardcoded secrets in compose | ✅ | All secrets via env var substitution |
+
+### 13.4 Docker Runtime Verification
+
+| Check | Status | Details |
+|-------|--------|---------|
+| `docker compose config` | ✅ | Valid YAML, all env vars resolved |
+| `docker compose build --no-cache` | ✅ | Both frontend and backend images built successfully |
+| `docker compose up -d` | ✅ | All 4 containers started |
+| PostgreSQL health | ✅ | `pg_isready` check passes |
+| Redis health | ✅ | Redis ping check passes |
+| Backend health | ✅ | `wget http://127.0.0.1:8000/api/v1/health` returns 200 |
+| Frontend health | ✅ | `wget http://127.0.0.1:80/health` returns 200 |
+| Nginx API proxy | ✅ | `http://localhost:3001/api/v1/products` returns 200 via nginx proxy |
+| Backend API (direct) | ✅ | `http://localhost:8000/api/v1/health` returns `{"status":"ok","environment":"production","database_connected":true}` |
+| Database type mismatch fixed | ✅ | Alembic migrations 0001-0011 all run successfully on PostgreSQL |
+| Idempotent seeding | ✅ | Re-running seed creates no duplicates ("11 existing products left unchanged") |
+| Restart safety | ✅ | Containers can be restarted without duplicating products or destroying data |
+
+### 13.5 Container Details
+
+| Container | Image | Port | Health |
+|-----------|-------|------|--------|
+| `securedapp_db` | `postgres:15-alpine` | 5432 (internal only) | ✅ healthy |
+| `securedapp_redis` | `redis:7-alpine` | 6379 (published) | ✅ healthy |
+| `securedapp_backend` | `securedapp-gem-intelligence-backend` | 8000 (published) | ✅ healthy |
+| `securedapp_frontend` | `securedapp-gem-intelligence-frontend` | 3001 (published) | ✅ healthy |
+
+**Note:** The local development backend (PID 27476 on :8000) and frontend (PID 9624 on :3001) continue running alongside Docker Compose. Docker Compose publishes backend on :8000 and frontend on :3001, which may conflict with local processes. For production Docker-only deployment, stop local processes first.
+
+### 13.6 Files Modified for Phase 8 (Docker)
+
+- `docker-compose.yml`
+- `.env.docker` (new)
+- `frontend/Dockerfile`
+- `backend/Dockerfile`
+- `backend/requirements.txt`
+- `backend/app/models/base_mixins.py`
+- `backend/app/seed.py`
+- `backend/alembic/versions/0009_dashboard_indexes_part2.py`
+- `backend/alembic/versions/0011_bid_source_id.py`
+- `docs/FRONTEND_CORRECTION_VERIFICATION_REPORT.md` (this report)
+
+### 13.7 Files NOT Modified
+
+- `backend/dev.db` — Not touched (SQLite dev database not used in Docker)
+- Local `.env` files — Preserved; `.env.docker` is a separate file for Docker only
+- No GitHub commit or push performed
+
+---
+
+**Final Docker readiness verdict:** All Docker Compose services build and run successfully. PostgreSQL, Redis, backend, and frontend are all healthy. The nginx API proxy correctly routes `/api` requests to the backend. Migrations run successfully on PostgreSQL. Seeding is idempotent. The application is ready for Docker-based production deployment.

@@ -1,4 +1,13 @@
-
+# SecuredApp GeM Bid Intelligence — Docker Compose
+#
+# Services:
+#   db       — PostgreSQL database (persisted volume)
+#   redis    — Redis (rate limiting, caching)
+#   backend  — FastAPI backend (alembic migrations + seed + uvicorn)
+#   frontend — React SPA served by nginx (proxies /api to backend)
+#
+# Environment variables are supplied via .env (see .env.example).
+# Never hardcode secrets in this file.
 
 services:
   db:
@@ -6,15 +15,15 @@ services:
     container_name: securedapp_db
     restart: always
     environment:
-      POSTGRES_USER: securedapp
-      POSTGRES_PASSWORD: securedapp_pass
-      POSTGRES_DB: securedapp_gem
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+    # PostgreSQL is NOT published to the host — accessible only via internal
+    # Docker network to the backend service.
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U securedapp -d securedapp_gem"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -25,6 +34,11 @@ services:
     restart: always
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   backend:
     build:
@@ -35,15 +49,74 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://securedapp:securedapp_pass@db:5432/securedapp_gem
-      - REDIS_URL=redis://redis:6379/0
-      - ENVIRONMENT=development
-      - LOG_LEVEL=INFO
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - SECRET_KEY=${SECRET_KEY}
+      - AUTH_REQUIRED=${AUTH_REQUIRED:-true}
+      - AUTH_ALGORITHM=${AUTH_ALGORITHM:-HS256}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      - RATE_LIMIT_REQUESTS_PER_MINUTE=${RATE_LIMIT_REQUESTS_PER_MINUTE:-60}
+      - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-10}
+      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3001,http://127.0.0.1:3001}
+      - TRUSTED_HOSTS=${TRUSTED_HOSTS:-localhost,127.0.0.1}
+      - SOURCE_SCHEDULER_ENABLED=${SOURCE_SCHEDULER_ENABLED:-true}
+      - SOURCE_SCHEDULER_TICK_SECONDS=${SOURCE_SCHEDULER_TICK_SECONDS:-60}
+      - GEM_DIRECT_ENABLED=${GEM_DIRECT_ENABLED:-true}
+      - GEM_DIRECT_SCHEDULER_ENABLED=${GEM_DIRECT_SCHEDULER_ENABLED:-true}
+      - GEM_DIRECT_SCHEDULER_INTERVAL_MINUTES=${GEM_DIRECT_SCHEDULER_INTERVAL_MINUTES:-20}
+      - GEM_DIRECT_MAX_PAGES=${GEM_DIRECT_MAX_PAGES:-250}
+      - GEM_DIRECT_USE_PLAYWRIGHT=${GEM_DIRECT_USE_PLAYWRIGHT:-true}
+      - GEM_DIRECT_ALLOWED_HOSTS=${GEM_DIRECT_ALLOWED_HOSTS:-gem.gov.in,bidplus.gem.gov.in}
+      - GEM_DIRECT_BID_STATUS_TYPE=${GEM_DIRECT_BID_STATUS_TYPE:-ongoing_bids}
+      - GEM_DIRECT_SORT_ORDER=${GEM_DIRECT_SORT_ORDER:-Bid-Start-Date-Latest}
+      - GEM_DIRECT_BID_TYPE=${GEM_DIRECT_BID_TYPE:-all}
+      - GEM_DIRECT_KEYWORD_FILTER_ENABLED=${GEM_DIRECT_KEYWORD_FILTER_ENABLED:-false}
+      - GEM_DIRECT_ENRICH_DETAIL_PAGES=${GEM_DIRECT_ENRICH_DETAIL_PAGES:-false}
+      - GEM_DIRECT_DOC_EXTRACTION_ENABLED=${GEM_DIRECT_DOC_EXTRACTION_ENABLED:-false}
+      - GEM_BOQ_AUTO_ENRICH_ENABLED=${GEM_BOQ_AUTO_ENRICH_ENABLED:-false}
+      - GEM_DIRECT_AUTO_RESUME=${GEM_DIRECT_AUTO_RESUME:-false}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_STARTTLS=${SMTP_STARTTLS:-true}
     depends_on:
       db:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: securedapp_frontend
+    restart: always
+    ports:
+      - "3001:80"
+    environment:
+      - VITE_BACKEND_URL=http://backend:8000
+      - VITE_ENVIRONMENT=production
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "-q", "-O", "/dev/null", "http://127.0.0.1:80/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
 
 volumes:
   postgres_data:

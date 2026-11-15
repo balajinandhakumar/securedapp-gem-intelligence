@@ -1,0 +1,138 @@
+........................................................................ [  9%]
+........................................................................ [ 18%]
+........................................................................ [ 28%]
+........................................................................ [ 37%]
+........................................................................ [ 46%]
+........................................................................ [ 56%]
+........................................................................ [ 65%]
+........................................................................ [ 74%]
+........................................................................ [ 84%]
+........................................................................ [ 93%]
+..................................................                       [100%]
+============================== warnings summary ===============================
+..\..\..\AppData\Roaming\Python\Python314\site-packages\fastapi\routing.py:233: 196 warnings
+  C:\Users\Balaji\AppData\Roaming\Python\Python314\site-packages\fastapi\routing.py:233: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_coroutine = asyncio.iscoroutinefunction(dependant.call)
+
+tests/test_gem_windows_event_loop.py::test_selector_loop_cannot_spawn_subprocess_but_helper_can
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:46: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    original = asyncio.get_event_loop_policy()
+
+tests/test_gem_windows_event_loop.py::test_selector_loop_cannot_spawn_subprocess_but_helper_can
+tests/test_gem_windows_event_loop.py::test_open_listing_session_starts_playwright_under_the_proactor_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:36: DeprecationWarning: 'asyncio.WindowsSelectorEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+tests/test_gem_windows_event_loop.py::test_selector_loop_cannot_spawn_subprocess_but_helper_can
+tests/test_gem_windows_event_loop.py::test_open_listing_session_starts_playwright_under_the_proactor_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:36: DeprecationWarning: 'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+tests/test_gem_windows_event_loop.py::test_selector_loop_cannot_spawn_subprocess_but_helper_can
+tests/test_gem_windows_event_loop.py::test_helper_restores_the_host_event_loop_policy
+tests/test_gem_windows_event_loop.py::test_helper_is_a_noop_when_proactor_is_already_active
+tests/test_gem_windows_event_loop.py::test_open_listing_session_starts_playwright_under_the_proactor_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\app\services\ingestion\gem_public_collector.py:1165: DeprecationWarning: 'asyncio.WindowsProactorEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+    proactor_policy_cls = getattr(asyncio, "WindowsProactorEventLoopPolicy", None)
+
+tests/test_gem_windows_event_loop.py::test_selector_loop_cannot_spawn_subprocess_but_helper_can
+tests/test_gem_windows_event_loop.py::test_helper_restores_the_host_event_loop_policy
+tests/test_gem_windows_event_loop.py::test_helper_is_a_noop_when_proactor_is_already_active
+tests/test_gem_windows_event_loop.py::test_open_listing_session_starts_playwright_under_the_proactor_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\app\services\ingestion\gem_public_collector.py:1171: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    previous = asyncio.get_event_loop_policy()
+
+tests/test_gem_windows_event_loop.py::test_selector_loop_cannot_spawn_subprocess_but_helper_can
+tests/test_gem_windows_event_loop.py::test_helper_restores_the_host_event_loop_policy
+tests/test_gem_windows_event_loop.py::test_open_listing_session_starts_playwright_under_the_proactor_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\app\services\ingestion\gem_public_collector.py:1175: DeprecationWarning: 'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(proactor_policy_cls())
+
+tests/test_gem_windows_event_loop.py::test_selector_loop_cannot_spawn_subprocess_but_helper_can
+tests/test_gem_windows_event_loop.py::test_helper_restores_the_host_event_loop_policy
+tests/test_gem_windows_event_loop.py::test_open_listing_session_starts_playwright_under_the_proactor_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\app\services\ingestion\gem_public_collector.py:1179: DeprecationWarning: 'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(previous)
+
+tests/test_gem_windows_event_loop.py::test_selector_loop_cannot_spawn_subprocess_but_helper_can
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:70: DeprecationWarning: 'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(original)
+
+tests/test_gem_windows_event_loop.py::test_helper_restores_the_host_event_loop_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:75: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    original = asyncio.get_event_loop_policy()
+
+tests/test_gem_windows_event_loop.py::test_helper_restores_the_host_event_loop_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:77: DeprecationWarning: 'asyncio.WindowsSelectorEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+    selector_policy = asyncio.WindowsSelectorEventLoopPolicy()
+
+tests/test_gem_windows_event_loop.py::test_helper_restores_the_host_event_loop_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:78: DeprecationWarning: 'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(selector_policy)
+
+tests/test_gem_windows_event_loop.py::test_helper_restores_the_host_event_loop_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:80: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    assert isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsProactorEventLoopPolicy)
+
+tests/test_gem_windows_event_loop.py::test_helper_restores_the_host_event_loop_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:80: DeprecationWarning: 'asyncio.WindowsProactorEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+    assert isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsProactorEventLoopPolicy)
+
+tests/test_gem_windows_event_loop.py::test_helper_restores_the_host_event_loop_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:81: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    assert asyncio.get_event_loop_policy() is selector_policy
+
+tests/test_gem_windows_event_loop.py::test_helper_restores_the_host_event_loop_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:83: DeprecationWarning: 'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(original)
+
+tests/test_gem_windows_event_loop.py::test_helper_is_a_noop_when_proactor_is_already_active
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:88: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    original = asyncio.get_event_loop_policy()
+
+tests/test_gem_windows_event_loop.py::test_helper_is_a_noop_when_proactor_is_already_active
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:90: DeprecationWarning: 'asyncio.WindowsProactorEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+tests/test_gem_windows_event_loop.py::test_helper_is_a_noop_when_proactor_is_already_active
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:90: DeprecationWarning: 'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+tests/test_gem_windows_event_loop.py::test_helper_is_a_noop_when_proactor_is_already_active
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:92: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    assert isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsProactorEventLoopPolicy)
+
+tests/test_gem_windows_event_loop.py::test_helper_is_a_noop_when_proactor_is_already_active
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:92: DeprecationWarning: 'asyncio.WindowsProactorEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+    assert isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsProactorEventLoopPolicy)
+
+tests/test_gem_windows_event_loop.py::test_helper_is_a_noop_when_proactor_is_already_active
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:93: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    assert isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsProactorEventLoopPolicy)
+
+tests/test_gem_windows_event_loop.py::test_helper_is_a_noop_when_proactor_is_already_active
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:93: DeprecationWarning: 'asyncio.WindowsProactorEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+    assert isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsProactorEventLoopPolicy)
+
+tests/test_gem_windows_event_loop.py::test_helper_is_a_noop_when_proactor_is_already_active
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:95: DeprecationWarning: 'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(original)
+
+tests/test_gem_windows_event_loop.py::test_open_listing_session_starts_playwright_under_the_proactor_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:118: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    original = asyncio.get_event_loop_policy()
+
+tests/test_gem_windows_event_loop.py::test_open_listing_session_starts_playwright_under_the_proactor_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:113: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    observed["policy"] = asyncio.get_event_loop_policy()
+
+tests/test_gem_windows_event_loop.py::test_open_listing_session_starts_playwright_under_the_proactor_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:124: DeprecationWarning: 'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    asyncio.set_event_loop_policy(original)
+
+tests/test_gem_windows_event_loop.py::test_open_listing_session_starts_playwright_under_the_proactor_policy
+  C:\Users\Balaji\Desktop\securedapp-gem-intelligence\backend\tests\test_gem_windows_event_loop.py:126: DeprecationWarning: 'asyncio.WindowsProactorEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+    assert isinstance(observed["policy"], asyncio.WindowsProactorEventLoopPolicy)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+770 passed, 235 warnings in 176.58s (0:02:56)

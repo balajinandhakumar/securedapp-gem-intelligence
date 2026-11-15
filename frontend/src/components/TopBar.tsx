@@ -1,5 +1,5 @@
 import React from 'react';
-import { IconBell, IconSearch, IconSunMoon } from './icons';
+import { IconBell, IconSearch, IconSunMoon, IconLogout } from './icons';
 
 interface TopBarProps {
   search: string;
@@ -8,10 +8,12 @@ interface TopBarProps {
   onToggleTheme: () => void;
   onOpenNotifications: () => void;
   notificationCount: number;
+  user?: { name?: string | null; email?: string | null; role?: string } | null;
+  onLogout?: () => void;
 }
 
 /**
- * Global top bar: search, theme toggle, notification drawer, avatar.
+ * Global top bar: search, theme toggle, notification drawer, user profile, logout.
  * Search is owned by the shell so it can drive the Bids page directly.
  */
 export const TopBar: React.FC<TopBarProps> = ({
@@ -21,7 +23,22 @@ export const TopBar: React.FC<TopBarProps> = ({
   onToggleTheme,
   onOpenNotifications,
   notificationCount,
+  user,
+  onLogout,
 }) => {
+  const initials = user?.name
+    ? user.name
+        .split(' ')
+        .map((part) => part[0])
+        .join('')
+        .toUpperCase()
+        .slice(0, 2)
+    : user?.email?.split('@')[0]?.toUpperCase().slice(0, 2) || 'SA';
+
+  const handleLogout = () => {
+    if (onLogout) onLogout();
+  };
+
   return (
     <header className="topbar">
       <label className="topbar-search">
@@ -55,9 +72,22 @@ export const TopBar: React.FC<TopBarProps> = ({
           {notificationCount > 0 && <span className="notif-count">{notificationCount}</span>}
         </button>
 
-        <div className="topbar-avatar" title="SecuredApp">
-          SA
-        </div>
+        {user && onLogout && (
+          <div className="user-profile" aria-label="User profile">
+            <div className="topbar-avatar" title={`${user.name} (${user.role})`}>
+              {initials}
+            </div>
+            <button
+              className="btn-secondary btn-sm"
+              onClick={handleLogout}
+              aria-label="Sign out"
+              title="Sign out"
+            >
+              <IconLogout size={14} />
+              Sign out
+            </button>
+          </div>
+        )}
       </div>
     </header>
   );

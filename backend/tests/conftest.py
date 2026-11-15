@@ -75,6 +75,10 @@ def no_live_gem_requests(monkeypatch):
     # and inject a fake session (see tests/test_gem_boq_auto.py).
     monkeypatch.setattr(settings, "GEM_BOQ_AUTO_ENRICH_ENABLED", False)
 
+    # Auto-resume reads from the production checkpoint and would make test
+    # runs start from a stale page instead of page 1. Disable during tests.
+    monkeypatch.setattr(settings, "GEM_DIRECT_AUTO_RESUME", False)
+
     def _no_browser(*args, **kwargs):
         raise AssertionError(
             "A test tried to open a real rendered GeM listing. Patch "

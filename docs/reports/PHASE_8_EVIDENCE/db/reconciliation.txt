@@ -1,0 +1,47 @@
+=== PHASE 8 DB RECONCILIATION ===
+
+Alembic head: 0011_bid_source_id
+source_id column on bids: True
+Foreign keys on bids: [{'id': 0, 'seq': 0, 'table': 'data_sources', 'from': 'source_id', 'to': 'id', 'on_update': 'NO ACTION', 'on_delete': 'SET NULL', 'match': 'NONE'}]
+Total sources: 31
+Source status counts: {'BLOCKED': 1, 'CONFIG_ERROR': 5, 'NO_RECORDS': 2, 'SUCCESS': 23}
+Total bids: 44062
+Bids with NULL source_id (GeM/non-state): 41811
+
+TOTALS: collected=2252 matched_bids=2 match_records=3 completed=2252 pending=0 failed=0
+
+J&K variants: [{'source_name': 'Jammu & Kashmir e-Procurement', 'n': 114}, {'source_name': 'Jammu and Kashmir e-Procurement', 'n': 16}]
+Sikkim variants: [{'source_name': 'Sikkim Government Tender Portal', 'n': 1}, {'source_name': 'Sikkim e-Procurement', 'n': 12}]
+
+=== PER-STATE ===
+andhra_pradesh               | Andhra Pradesh e-Procurement     | CONFIG_ERROR  | collected=   0 matched=  0 records=  0 completed=   0 pending=  0 failed=  0
+arunachal_pradesh            | Arunachal Pradesh e-Procurement  | SUCCESS       | collected=  10 matched=  0 records=  0 completed=  10 pending=  0 failed=  0
+assam                        | Assam e-Procurement              | SUCCESS       | collected=  78 matched=  1 records=  1 completed=  78 pending=  0 failed=  0
+bihar                        | Bihar e-Procurement              | CONFIG_ERROR  | collected=   0 matched=  0 records=  0 completed=   0 pending=  0 failed=  0
+chandigarh                   | Chandigarh e-Procurement         | SUCCESS       | collected=  55 matched=  0 records=  0 completed=  55 pending=  0 failed=  0
+chhattisgarh                 | Chhattisgarh e-Procurement       | NO_RECORDS    | collected=   0 matched=  0 records=  0 completed=   0 pending=  0 failed=  0
+delhi                        | Delhi e-Procurement              | SUCCESS       | collected= 126 matched=  0 records=  0 completed= 126 pending=  0 failed=  0
+goa                          | Goa e-Procurement                | BLOCKED       | collected=   0 matched=  0 records=  0 completed=   0 pending=  0 failed=  0
+gujarat                      | Gujarat e-Procurement            | CONFIG_ERROR  | collected=   0 matched=  0 records=  0 completed=   0 pending=  0 failed=  0
+haryana                      | Haryana e-Procurement            | SUCCESS       | collected= 179 matched=  0 records=  0 completed= 179 pending=  0 failed=  0
+himachal_pradesh             | Himachal Pradesh e-Procurement   | SUCCESS       | collected=  87 matched=  0 records=  0 completed=  87 pending=  0 failed=  0
+jammu_kashmir                | Jammu and Kashmir e-Procurement  | SUCCESS       | collected= 130 matched=  0 records=  0 completed= 130 pending=  0 failed=  0
+jharkhand                    | Jharkhand e-Procurement          | SUCCESS       | collected=  91 matched=  0 records=  0 completed=  91 pending=  0 failed=  0
+karnataka                    | Karnataka e-Procurement          | CONFIG_ERROR  | collected=   0 matched=  0 records=  0 completed=   0 pending=  0 failed=  0
+kerala                       | Kerala e-Procurement             | SUCCESS       | collected= 186 matched=  0 records=  0 completed= 186 pending=  0 failed=  0
+madhya_pradesh               | Madhya Pradesh e-Procurement     | SUCCESS       | collected= 169 matched=  0 records=  0 completed= 169 pending=  0 failed=  0
+maharashtra                  | Maharashtra e-Procurement        | SUCCESS       | collected= 233 matched=  0 records=  0 completed= 233 pending=  0 failed=  0
+manipur                      | Manipur e-Procurement            | NO_RECORDS    | collected=  10 matched=  0 records=  0 completed=  10 pending=  0 failed=  0
+meghalaya                    | Meghalaya e-Procurement          | SUCCESS       | collected=  10 matched=  0 records=  0 completed=  10 pending=  0 failed=  0
+mizoram                      | Mizoram e-Procurement            | SUCCESS       | collected=   2 matched=  0 records=  0 completed=   2 pending=  0 failed=  0
+nagaland                     | Nagaland e-Procurement           | SUCCESS       | collected=   5 matched=  0 records=  0 completed=   5 pending=  0 failed=  0
+odisha                       | Odisha e-Procurement             | SUCCESS       | collected= 101 matched=  0 records=  0 completed= 101 pending=  0 failed=  0
+punjab                       | Punjab e-Procurement             | SUCCESS       | collected= 101 matched=  1 records=  2 completed= 101 pending=  0 failed=  0
+rajasthan                    | Rajasthan e-Procurement          | SUCCESS       | collected= 106 matched=  0 records=  0 completed= 106 pending=  0 failed=  0
+sikkim                       | Sikkim e-Procurement             | SUCCESS       | collected=  13 matched=  0 records=  0 completed=  13 pending=  0 failed=  0
+tamil_nadu                   | Tamil Nadu e-Procurement         | SUCCESS       | collected= 211 matched=  0 records=  0 completed= 211 pending=  0 failed=  0
+telangana                    | Telangana e-Procurement          | CONFIG_ERROR  | collected=   0 matched=  0 records=  0 completed=   0 pending=  0 failed=  0
+tripura                      | Tripura e-Procurement            | SUCCESS       | collected=  48 matched=  0 records=  0 completed=  48 pending=  0 failed=  0
+uttar_pradesh                | Uttar Pradesh e-Procurement      | SUCCESS       | collected= 118 matched=  0 records=  0 completed= 118 pending=  0 failed=  0
+uttarakhand                  | Uttarakhand e-Procurement        | SUCCESS       | collected=  74 matched=  0 records=  0 completed=  74 pending=  0 failed=  0
+west_bengal                  | West Bengal e-Procurement        | SUCCESS       | collected= 109 matched=  0 records=  0 completed= 109 pending=  0 failed=  0

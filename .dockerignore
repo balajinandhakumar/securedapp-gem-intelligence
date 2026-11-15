@@ -1,0 +1,117 @@
+# SecuredApp GeM Bid Intelligence — Docker deployment files
+# Root .dockerignore — excludes local/dev artifacts from the Docker build context
+
+# --- Version control ---
+.git/
+.gitignore
+.gitattributes
+
+# --- Environment & secrets (never into images) ---
+.env
+.env.*
+!.env.example
+backend/.env
+!backend/.env.example
+frontend/.env
+!frontend/.env.example
+
+# --- Databases & local data (never into images) ---
+*.sqlite
+*.sqlite3
+*.db
+pgdata/
+data/
+backend/data/
+backend/dev.db*
+backend/test.db*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+.nyc_output/
+
+# --- Node / Frontend ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+frontend/build/
+# frontend/dist/ is pre-built locally and copied into the image
+# frontend/dist/
+playwright-report/
+screenshots/
+vite-*.log
+
+# --- Logs & temporary runtime artifacts ---
+*.log
+*.err
+*.shm
+*.wal
+
+# --- Local data exports & machine-specific files ---
+1000
+intel_noparam.json
+
+# --- Local backups (never commit) ---
+PHASE_6_2_BACKUP/
+*.bak
+*.bak-*
+*.pre-*.bak
+
+# --- System ---
+.DS_Store
+Thumbs.db
+
+# --- IDE & Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Misc local scripts & audit artifacts (not part of the app) ---
+audit_phase_6_6_*.py
+check_*.py
+fix_*.py
+run_*.py
+test_*.py
+verify_*.py
+inspect_*.py
+investigate_*.py
+list_*.py
+scan_*.py
+continue_*.py
+final_*.py
+fresh_*.py
+matchall_*.py
+state_*.py
+tmpchk.py
+_dbinfo.py
+audit_*.py
+build_*.py
+categorize_*.py
+generate_*.py

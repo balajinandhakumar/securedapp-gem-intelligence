@@ -91,6 +91,27 @@ def process_bid_intelligence(
     if opp_analyzer is None:
         opp_analyzer = OpportunityAnalyzer()
 
+    # Concurrency guard: if another process (scheduler or manual run) is
+    # already evaluating this bid, do not create duplicate score/analysis
+    # rows. Return early so the caller can skip or retry.
+    if bid.matching_status == "PROCESSING":
+        return {
+            "bid_id": str(bid.id),
+            "relevance_score": 0.0,
+            "match_state": "SKIPPED_CONCURRENT",
+            "opportunity_score": 0.0,
+            "opportunity_label": "SKIPPED",
+            "notification_created": False,
+            "primary_product": None,
+            "skipped_concurrent": True,
+        }
+
+    # Mark evaluation as in progress so concurrent runners skip this bid.
+    bid.matching_status = "PROCESSING"
+    bid.last_updated_at = datetime.now(timezone.utc)
+    if commit:
+        db.commit()
+
     # 1. Product Matching against 11 SecuredApp products + differentiation
     match_results = match_bid_against_products(db, bid)
 
@@ -187,6 +208,14 @@ def process_bid_intelligence(
             )
             db.add(created_notif)
             notification_created = True
+
+    # Mark evaluation as complete. matching_status reflects whether the
+    # intended evaluation process finished (not whether a match was found).
+    # Every bid that reaches this point has been evaluated against all active
+    # products, so COMPLETED is the correct terminal status.
+    bid.matching_status = "COMPLETED"
+    bid.matched_at = datetime.now(timezone.utc)
+    bid.last_updated_at = datetime.now(timezone.utc)
 
     if commit:
         db.commit()

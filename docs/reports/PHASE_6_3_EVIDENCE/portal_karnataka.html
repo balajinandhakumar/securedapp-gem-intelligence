@@ -1,0 +1,471 @@
+
+<html>
+<head>
+
+<noscript>
+<meta http-equiv="refresh" content="0;url=indexerror.jsp">
+</noscript>
+
+
+<title>eProcurement</title>
+
+
+
+
+
+<meta charset="utf-8">
+<meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<link rel="stylesheet" 	href="../resources/css/bootstrap.min.css">
+ <link rel="stylesheet" 	href="../resources/css/font-awesome.min.css">
+ 
+<script src="../resources/script/jquery.min.js" type="text/javascript"></script>
+<script src="../resources/script/bootstrap.min.js"></script>
+<script src="../resources/script/script.js"></script>
+
+<link rel="stylesheet" href="../resources/css/style.css">
+<link rel="icon" href="../resources/images/favicon.png" type="image/gif">
+
+
+
+
+
+<script>
+	$(document).ready(function(){
+		$("#myModal").modal('show');
+	});
+</script>
+</head>
+<body>
+		<div class="container  border-0" style="width: 80%">
+
+		
+		
+<div class="panel panel-default border-0" style="margin-bottom: 0px">
+	<div class="panel-header border-0">
+		<header class="main-header">
+			<img src="../resources/images/eproc_logo_kannada.jpg"
+				alt="HTML5 Icon" style="width: 100%; height: 109px;"
+				class="img-responsive">
+		</header>
+	</div>
+	<div class="panel-body border-0" style="padding: 0px;">
+		<div class="row">
+			<div class="col-md-2" style="margin-top: 11px;width: 30%" id="hme">
+				<nav class="nav btn">
+					<a class="nav-link active headermenu" href="index.jsp">
+					   <b style="color: blue;">ಮುಖ ಪುಟ</b>
+					   <i style="border-right: solid 2px black;"></i>
+					</a>
+					<a class="nav-link headermenu" style="color: blue">
+						<b style="color: blue;" onclick="popup('https://eproc.karnataka.gov.in/eprocurement/login.seam')">ಲಾಗಿನ್ </b>
+						<i style="border-right: solid 2px black;"></i>
+					</a>
+					<a class="nav-link headermenu" style="color: blue" href="contact.jsp">
+						<b style="color: blue">ಸಂಪರ್ಕಿಸಿ </b>
+					</a>
+				</nav>
+			</div>
+			<div class="col-md-7" style="margin-top: 11px;width: 53%">
+				<p class="glyphicon">
+					<b style="color: #0000FF;">ಸಹಾಯವಾಣಿ ಕೇಂದ್ರ</b><i class="fa fa-caret-right"
+						style="font-size: 17px; color: #0000FF"></i>
+				</p>
+				<p class="fa fa-phone"
+					style="margin: 0px; padding: 1px; color: #337ab7">
+					<b>+91-9240214000, +91-9240214001</b>
+				</p>
+				<p class="fa fa-envelope"
+					style="margin: 0px; padding: 1px; color: #337ab7">
+					<b><a href="mailto:support@eprochelpdesk.com"> support[at]eprochelpdesk[dot]com
+					</a></b>
+				</p>
+				<!-- 
+				<nav class="nav btn" style="margin: 0px; padding: 1px;float: right;">
+					<a class="nav-link headermenu" style="color: blue">
+						<b style="color: blue;" onclick="popup('https://eproc.karnataka.gov.in/eproc_refund/login.seam')">ಸಿಇಜಿ ಲಾಗಿನ್ </b>
+					</a>
+				</nav>
+				 -->
+			</div>
+			<div class="col-md-2" id="langbttn" style="width: 17%">
+
+				<form method="post" action="header">
+					<div class="col-md-6">
+						<h6>
+							<button
+								
+								  
+								  
+								    class="translate"
+								  
+								
+								id="englishid" onclick="submitForm('en')"
+								style="width: 75px; height: 26px; margin: 0px; font-size: 13px;"
+								>
+								<b>English</b>
+							</button>
+						</h6>
+					</div>
+					<div class="col-md-6">
+						<h6>
+							<button
+								
+					  
+					   class="translate disable"
+					  
+					  
+					
+								id="kannadaid" onclick="submitForm('kn')"
+								style="width: 67px; height: 26px; margin: 0px; font-size: 13px;"
+								disabled="disabled" >
+								<b>ಕನ್ನಡ</b>
+							</button>
+						</h6>
+					</div>					
+					<input type="hidden" id="language" name="language"
+						value="kn" />
+					<input type="hidden" id="from" name="from"
+						value="/eprocportal/pages/index.jsp" />	
+				</form>
+
+			</div>
+		</div>
+	</div>
+</div>
+		
+
+		
+		<!-- start of the buttons -->
+		<div class="panel panel-default border-0" style="margin-bottom: 0px">
+			<div class="panel-header border-0">
+				<div class="col-xs-2" id="mnu"
+					onclick="popup('https://eproc.karnataka.gov.in/eprocurement/common/eproc_tenders_list.seam')">
+					<button type="button" class="btn btn-primary" id="btnstyl">
+						<h2 class="h2crd">
+							ದರಖಾಸ್ತುಗಳ ಪಟ್ಟಿ
+						</h2>
+					</button>
+				</div>
+
+				<div class="col-xs-2" id="mnu">
+					<button type="button" class="btn btn-primary-ct" id="btnstyl">
+						
+							
+							
+								<h4 class="nmbr" id="tenderClose" style="margin: 0px">&nbsp;0</h4>
+								<p style="white-space: normal">
+									ಇಂದು ಮುಕ್ತಾಯವಾಗುವ ದರಖಾಸ್ತುಗಳು
+								</p>
+							
+						
+					</button>
+				</div>
+				<div class="col-xs-2" id="mnu">
+					<button type="button" class="btn btn-primary-ct" id="btnstyl">
+						<h4 class="nmbr" id="tenderPublished">&nbsp;0</h4>
+						<p>
+							ಪ್ರಕಟವಾದ ದರಖಾಸ್ತುಗಳು 
+						</p>
+					</button>
+				</div>
+				<div class="col-xs-2" id="mnu"
+					onclick="popup('https://eproc.karnataka.gov.in/eprocurement/common/eproc_auctions_list.seam')">
+					<button type="button" class="btn btn-primary" id="btnstyl">
+						<h2 class="h2crd">
+							ಹರಾಜುಗಳ ಪಟ್ಟಿ
+						</h2>
+					</button>
+				</div>
+				<div class="col-xs-2" id="mnu">
+					<button type="button" class="btn btn-primary-ct" id="btnstyl">
+						<h4 class="nmbr" id="auctionLive">&nbsp;0</h4>
+						<p>
+							ಚಾಲ್ತಿಯಲ್ಲಿರುವ ಹರಾಜುಗಳು
+						</p>
+					</button>
+				</div>
+				<div class="col-xs-2" id="mnu">
+					<button type="button" class="btn btn-primary-ct" id="btnstyl">
+						
+							
+							
+								<h4 class="nmbr" id="auctionClose" style="margin: 0px">&nbsp;0</h4>
+								<p style="white-space: normal">
+									ಇಂದು ಮುಕ್ತಾಯವಾಗುವ ಹರಾಜುಗಳು
+								</p>
+
+							
+						
+					</button>
+				</div>
+				<div class="col-xs-2" id="mnu"
+					onclick="popup('https://eproc.karnataka.gov.in/eprocurement/regn/supplier_registration_terms.seam')">
+					<button type="button" class="btn btn-primary" id="btnstyl">
+						<h2 class="h2crd" style="font-size: 17px; margin-bottom: 25px;">
+							ಗುತ್ತಿಗೆದಾರರ ನೋಂದಣಿ
+						</h2>
+					</button>
+				</div>
+				<!-- <div class="col-xs-2" id="mnu"
+					onclick="popup('https://eprocdashboard.karnataka.gov.in/SPTSC')">
+					<button type="button" class="btn btn-primary" id="btnstyl">
+						<h2 class="h2crd" style="font-size: 15px; margin-bottom: 25px;">
+							ರಾಜ್ಯ ಟೆಂಡರ್  <br />
+							ಪೂರ್ವ ಪರಿಶೀಲನಾ  ಸಮಿತಿ   
+						</h2>
+					</button>
+				</div> -->
+				<!--<div class="col-xs-2" id="mnu">
+				<table>
+					<tr>
+						<td style="text-align: center">
+						<a href='https://amritmahotsav.nic.in/'
+											target="_blank">
+			                        <img class="btn btn-primary" style="height: 67px;width: 150px;border: 0px;" id="amritmah"
+											src="../resources/images/amritmahotsava_small.jpg" alt="HTML5 Icon">
+						</a>
+						</td>
+						<td style="text-align: center">
+						<a href="/documents/g20_video_ceg.mp4"
+											target="_blank">
+			                        <img class="btn btn-primary" style="height: 67px;width: 150px;border: 0px;" id="G20India"
+											src="../resources/images/kannada_G20_india.jpg" alt="G20India">
+						</a>
+						</td>
+					</tr>
+				</table>		
+				</div>-->
+			</div>
+			<div class="panel-body border-0" style="padding: 0px;"></div>
+		</div>
+			
+		<div class="panel panel-default border-0" style="margin-bottom: 0px">
+			<div class="panel-header border-0">
+					<div class="card-body">
+						<div class="abtus">
+						
+							
+							
+							<p style="color: #f60808; font-size: 15px;">
+								<b>ಸರ್ಕಾರಿ ಬಳಕೆದಾರರ ಗಮನಕ್ಕೆ:&nbsp;</b>
+								ಕರ್ನಾಟಕ ಸಾರ್ವಜನಿಕ ಸಂಗ್ರಹಣಾ ತಂತ್ರಾಂಶದ ಹೊಸ ಆವೃತ್ತಿಯಲ್ಲಿ ನೋಂದಣಿಯಾಗಲು ಬೇಕಿರುವ ಮಾಹಿತಿಯನ್ನು ಒದಗಿಸಲು &nbsp;
+								<b><a href="/documents/StaffUserEnrollmentForm.pdf"
+											target="_blank" style="color: #f60808; font-size: 15px;">
+		                        ಕ್ಲಿಕ್ ಮಾಡಿ&nbsp;
+		                        </a></b>
+							</p>
+							<p style="color: #f60808; font-size: 15px;">
+								<b>ಪೂರೈಕೆದಾರರ ಗಮನಕ್ಕೆ: &nbsp;</b>
+								7 ಜೂನ್ 2024 ರಿಂದ ಹೊಸ
+								<b><a href='https://kppp.karnataka.gov.in/'
+											target="_blank" style="color: #f60808; font-size: 15px;">
+		                        ಕರ್ನಾಟಕ ಸಾರ್ವಜನಿಕ ಸಂಗ್ರಹಣಾ ಪೋರ್ಟಲ್
+		                        </a></b>
+		                        ನಲ್ಲಿ ಪೂರೈಕೆದಾರರ ನೋಂದಣಿ ಸಕ್ರಿಯಗೊಳಿಸಲಾಗುತ್ತದೆ ಮತ್ತು 
+		                        <b><a href='https://eproc.karnataka.gov.in'
+											target="_blank" style="color: #f60808; font-size: 15px;">
+		                        ಇ-ಸಂಗ್ರಹಣಾ ಪೋರ್ಟಲ
+		                        </a></b>
+		                        ನಲ್ಲಿ ನೋಂದಣಿಯನ್ನು ನಿಷ್ಕ್ರಿಯಗೊಳಿಸಲಾಗುತ್ತದೆ. ಎಲ್ಲಾ ಪೂರೈಕೆದಾರರು ಹೊಸ ನೋಂದಣಿ ಮತ್ತು ನವೀಕರಣಗಳಿಗಾಗಿ
+		                        <b><a href='https://kppp.karnataka.gov.in/'
+											target="_blank" style="color: #f60808; font-size: 15px;">
+		                        ಕರ್ನಾಟಕ ಸಾರ್ವಜನಿಕ ಸಂಗ್ರಹಣಾ ಪೋರ್ಟಲ್
+		                        </a></b>
+		                        ಅನ್ನು ಬಳಸಲು ಕೋರಲಾಗಿದೆ.
+		                        ( ಟೆಂಡರ್  ಧಾರರ ವಿಭಾಗ  -> ಪೂರೈಕೆದಾರರ ನೋಂದಣಿ )   
+							</p>
+							
+						
+						</div>
+				</div>
+			</div>
+		</div>
+		
+		<div class="panel panel-default border-0" style="margin-bottom: 0px">
+			<div class="panel-body border-0" style="padding: 0px;">
+				<div class="row" style="margin-top: 2px;">
+					<div class="col-lg-12">
+						<div class="col-lg-2"
+							style="padding-left: 0px; padding-right: 5px;">
+							<a
+								href='https://finance.karnataka.gov.in/info-3/Acts+and+Rules+-+KTPP/KTPP+Rules+And+Related+Amendments/kn'
+								target="_blank">
+								<button type="button" class="btn btn-primary" id="btnsty2">
+									ಕೆ.ಟಿ.ಪಿ.ಪಿ ಕಾಯ್ದೆ 
+								</button>
+							</a> <a href="contractors.jsp">
+								<button type="button" class="btn btn-primary" id="btnsty2">
+									ಗುತ್ತಿಗೆದಾರರು
+								</button>
+							</a> <a href="govtuser.jsp">
+								<button type="button" class="btn btn-primary" id="btnsty2">
+									ಸರ್ಕಾರಿ ಬಳಕೆದಾರರು
+								</button>
+							</a> <a href="citizens.jsp">
+								<button type="button" class="btn btn-primary" id="btnsty2">
+									ನಾಗರಿಕರು
+								</button>
+							</a>
+						</div>
+
+						<div class="col-lg-6 border-bottom-0 ">
+							<div
+								class="card border-dark mb-3 row align-text-top align-middle">
+								<div class="card-header" id="crdhedr">
+									<h4
+										style="text-align: left; padding-top: 5px; padding-left: 2%;">
+										ನಮ್ಮ ಸಂಗ್ರಹಣಾ ವೇದಿಕೆ ಬಗ್ಗೆ  
+									</h4>
+								</div>
+								<div class="card-body"
+									style="border: solid 4px rgba(244, 244, 244, 0.44);">
+									<div class="abtus">
+										<p class="text-justify mb-0" style="justify-content: center">
+											ಕರ್ನಾಟಕ ಸರ್ಕಾರವು ಇ-ಆಡಳಿತ ಶಕೆಯನ್ನು ಪ್ರಾರಂಭಿಸುವಲ್ಲಿ ಮಾಹಿತಿ ತಂತ್ರಜ್ಞಾನದ ಬಳಕೆಯಲ್ಲಿ ಧೃಡ ನಂಬಿಕೆಯನ್ನಿಟ್ಟು ಸರ್ಕಾರದ ಕಾರ್ಯಾಚರಣೆಯನ್ನು ಸರಳೀಕರಣಗೊಳಿಸುತ್ತಿದೆ.
+										</p>
+										<p class="text-justify ">
+											ತನ್ಮೂಲಕ ಆಡಳಿತದಲ್ಲಿ ಪಾರದರ್ಶಕತೆ ಉತ್ತಮ ಗುಣಮಟ್ಟ ಸಾರ್ವಜನಿಕರಿಗೆ ನಿಯತವಾಗಿ ಮಾಹಿತಿಗಳ ಲಭ್ಯತೆ ಹಾಗೂ ದಕ್ಷತೆ ಮತ್ತು ಮಿತ ವ್ಯಯದೊಂದಿಗೆ ಸೇವೆಗಳ ಪೂರೈಕೆಯ ಜೊತೆಗೆ ಗುರುತಿಸಲಾದ ಸೇವೆಗಳನ್ನು ಅನ್‌ಲೈನ್‌ನಲ್ಲಿ ಒದಗಿಸುವಲ್ಲಿ ಸರ್ಕಾರವು ಶ್ರಮಿಸುತ್ತಿದೆ.
+										</p>
+
+									</div>
+								</div>
+							</div>
+						</div>
+						<div class="col-lg-4">
+							<div
+								class="card border-dark mb-3 row align-text-top align-middle">
+								<div class="card-header" id="crdhedr">
+									<h4
+										style="text-align: left; padding-top: 5px; padding-left: 2%;">
+										ಪ್ರಕಟಣೆಗಳು
+									</h4>
+								</div>
+								<div class="card-body">
+									<marquee behavior="scroll" scrolldelay="0" scrollamount="3"
+										direction="up" height="180" width="100%" id='scrol1'>
+										<div id="announcement"
+											onMouseOver="document.getElementById('scrol1').stop();"
+											onMouseOut="document.getElementById('scrol1').start();">
+											
+												<p id="events">Suppliers/Bidders/Contractors who need training on new Karnataka Public Procurement Portal are requested to contact Helpdesk @ +91-9240214000 / +91-9240214001 and register for Training to be held every Wednesday in MS building, Bengaluru and the Regional Center at Dharwad.</p>
+											
+												<p id="events">Kind Attention:
+“Suppliers are requested to update their bank account details in the e-Procurement 1.0 portal to ensure the smooth processing and refund of EMDs, and to avoid any rejection of EMD payments.”
+</p>
+											
+												<p id="events">As per the Finance Department Note No. FD 618 Exp-12/2025 dated 14/10/2025, all Tender Inviting Authorities (TIA) and Tender Accepting Authorities (TAA) of procurement entities are hereby instructed to take immediate action to refund the Earnest Money Deposit (EMD) amounts retained at the departmental level — which have not yet been refunded to the bidders — for tenders/auctions processed through the e-Procurement Software Version 1.0, within three months from the date (25/10/2025) of this advertisement.
+On failure to initiate EMD refunds to the bidders within the stipulated three-month period, the said amounts shall be forfeited and credited to the Consolidated Fund of the State.</p>
+											
+												<p id="events">ಆರ್ಥಿಕ ಇಲಾಖೆಯ ಟಿಪ್ಪಣಿ ಸಂಖ್ಯೆ: ಆಇ 618 ವೆಚ್ಚ-12/2025 ದಿನಾಂಕ:14/10/2025 ರನ್ವಯ ಎಲ್ಲಾ ಸಂಗ್ರಹಣಾ ಘಟಕಗಳ ಟೆಂಡರ್‌ ಅಹ್ವಾನ ಪ್ರಾಧಿಕಾರ ಹಾಗೂ ಟೆಂಡರ್‌ ಅಂಗೀಕಾರ ಪ್ರಾಧಿಕಾರಗಳು ಇ-ಸಂಗ್ರಹಣಾ ತಂತ್ರಾಂಶ 1.0 ಆವೃತ್ತಿಯಲ್ಲಿನ ಟೆಂಡರ್‌/ಹರಾಜುಗಳಿಗೆ ಸಂಬಂಧಿಸಿದಂತೆ ಇಲಾಖಾ ಮಟ್ಟದಲ್ಲಿ ಬಿಡ್ಡುದಾರರಿಗೆ ಮರುಪಾವತಿಸದೇ ಬಾಕಿ ಉಳಿಸಿಕೊಂಡಿರುವ ಮುಂಗಡ ಹಣ (ಇ.ಎಂ.ಡಿ) ಮೊತ್ತವನ್ನು ಈ ಪತ್ರಿಕಾ ಪ್ರಕಟೆಣೆಯ (25/10/2025) ದಿನದಿಂದ ಮೂರು ತಿಂಗಳುಗಳ ಒಳಗಾಗಿ ಮರುಪಾವತಿಸಲು ತುರ್ತಾಗಿ ಕ್ರಮ ವಹಿಸಲು ತಿಳಿಸಿದೆ.
+ಮೂರು ತಿಂಗಳ ಒಳಗೆ ಮುಂಗಡ ಹಣ (ಇ.ಎಂ.ಡಿ) ಮೊತ್ತವನ್ನು ಬಿಡ್ಡುದಾರರಿಗೆ ಮರುಪಾವತಿಸದೇ ಇದ್ದಲ್ಲಿ, ಆ ಮೊತ್ತವನ್ನು ಮುಟ್ಟುಗೋಲು ಹಾಕಿಕೊಂಡು ಸರ್ಕಾರದ ಸಂಚಿತ ನಿಧಿಗೆ ಜಮೆ ಮಾಡಲಾಗುವುದು.</p>
+											
+										</div>
+									</marquee>
+
+
+								</div>
+							</div>
+						</div>
+
+					</div>
+				</div>
+			</div>
+		</div>
+
+		
+		<div class="panel panel-default border-0" style="margin-bottom: 2%;">
+			<div class="panel-body border-0" style="padding: 0px;">
+				<div class="row" style="margin-top: 2px;">
+					<div class="col-lg-12">
+						<div class="col-lg-8">
+							<div
+								class="card border-dark mb-3 row align-text-top align-middle">
+								<div class="card-header"
+									style="width: 100%; height: 40px; text-align: center; background-color: #0099cc; color: white; border: solid 2px #c3c3c3">
+									<h4 style="text-align: left; margin: 7px;">
+										ಪ್ರಶಸ್ತಿಗಳು ಮತ್ತು ಸಾಧನೆಗಳು 
+									</h4>
+								</div>
+								<div class="card-body">
+									<div class="row col-sm-12">
+										<div class="col-sm-4">
+											<img class="rounded float-left" id="awdzz"
+												src="../resources/images/Award-1.jpg" alt="HTML5 Icon">
+											<h6 id="awrdz1">
+												<b>ಸಿ.ಸ್ಈ.  ನಿಹಿಲೆಂಟ್  ಈ-ಗವರ್ನನ್ಸ್ ಅವಾರ್ಡ್ </b>
+											</h6>
+										</div>
+										<div class="col-sm-4" style="margin-top: 6px;">
+											<img class="rounded center awdzz" id="awdzz"
+												src="../resources/images/Award-2.jpg" alt="HTML5 Icon">
+											<h6 id="awrdz1">
+												<b>ನ್ಯಾಷನಲ್ ಇ-ಗವರ್ನನ್ಸ್ ಅವಾರ್ಡ್</b>
+											</h6>
+										</div>
+										<div class="col-sm-4">
+											<img class="rounded float-right awdzz" id="awdzz"
+												src="../resources/images/Award-3.jpg" alt="HTML5 Icon">
+											<h6 id="awrdz1">
+												<b>ಫ್ಯೂಚರ್  ಜಿ.ಓ.ವಿ ಅವಾರ್ಡ್</b>
+											</h6>
+										</div>
+									</div>
+								</div>
+							</div>
+						</div>
+
+						<div class="col-lg-4">
+							<div
+								class="card border-dark mb-3 row align-text-top align-middle">
+								<div class="card-header"
+									style="width: 100%; height: 40px; text-align: center; background-color: #0099cc; color: white; border: solid 2px #c3c3c3">
+									<h4 style="text-align: left; margin: 7px;">
+										ಘಟನೆಗಳು ಮತ್ತು ಸೂಚನೆಗಳು
+									</h4>
+								</div>
+								<div class="card-body"
+									style="width: 100%; border: solid 2px rgba(244, 244, 244, 0.44);">
+									<marquee behavior="scroll" scrolldelay="0" scrollamount="3"
+										direction="up" style="height: 192px" width="100%" id='scr1'>
+
+										<div id="eventsnotification"
+											onMouseOver="document.getElementById('scr1').stop();"
+											onMouseOut="document.getElementById('scr1').start();">
+											
+												<p id="events">State Pre-Tender Scrutiny Committee is publishing the Draft Tender Documents submitted by the Departments for 7 days in the KPP portal to invite suggestions from the Registered Contractors/Service Providers/Consultants. Interested may submit their suggestions through State Pre-Tender Scrutiny Committee link available at KPP Portal by using their existing e-procurement login credentials.</p>
+											
+												<p id="events">ಆರ್ಥಿಕ ಇಲಾಖೆಯ ಟಿಪ್ಪಣಿ ಸಂಖ್ಯೆ: ಆಇ 618 ವೆಚ್ಚ-12/2025 ದಿನಾಂಕ:14/10/2025 ರನ್ವಯ ಎಲ್ಲಾ ಸಂಗ್ರಹಣಾ ಘಟಕಗಳ ಟೆಂಡರ್‌ ಅಹ್ವಾನ ಪ್ರಾಧಿಕಾರ ಹಾಗೂ ಟೆಂಡರ್‌ ಅಂಗೀಕಾರ ಪ್ರಾಧಿಕಾರಗಳು ಇ-ಸಂಗ್ರಹಣಾ ತಂತ್ರಾಂಶ 1.0 ಆವೃತ್ತಿಯಲ್ಲಿನ ಟೆಂಡರ್‌/ಹರಾಜುಗಳಿಗೆ ಸಂಬಂಧಿಸಿದಂತೆ ಇಲಾಖಾ ಮಟ್ಟದಲ್ಲಿ ಬಿಡ್ಡುದಾರರಿಗೆ ಮರುಪಾವತಿಸದೇ ಬಾಕಿ ಉಳಿಸಿಕೊಂಡಿರುವ ಮುಂಗಡ ಹಣ (ಇ.ಎಂ.ಡಿ) ಮೊತ್ತವನ್ನು ಈ ಪತ್ರಿಕಾ ಪ್ರಕಟೆಣೆಯ (25/10/2025)ದಿನದಿಂದ ಮೂರು ತಿಂಗಳುಗಳ ಒಳಗಾಗಿ ಮರುಪಾವತಿಸಲು ತುರ್ತಾಗಿ ಕ್ರಮ ವಹಿಸಲು ತಿಳಿಸಿದೆ.
+ಮೂರು ತಿಂಗಳ ಒಳಗೆ ಮುಂಗಡ ಹಣ (ಇ.ಎಂ.ಡಿ) ಮೊತ್ತವನ್ನು ಬಿಡ್ಡುದಾರರಿಗೆ ಮರುಪಾವತಿಸದೇ ಇದ್ದಲ್ಲಿ, ಆ ಮೊತ್ತವನ್ನು ಮುಟ್ಟುಗೋಲು ಹಾಕಿಕೊಂಡು ಸರ್ಕಾರದ ಸಂಚಿತ ನಿಧಿಗೆ ಜಮೆ ಮಾಡಲಾಗುವುದು.</p>
+											
+												<p id="events">ಬಳಕೆದಾರರ ಗಮನಕ್ಕೆ: ಬಳಕೆದಾರರ ಅನುಕೂಲಕ್ಕಾಗಿ ಇ-ಪ್ರೊಕ್ಯೂರ್ಮೆಂಟ್ ಸಹಾಯವಾಣಿ ಸೇವೆಗಳಿಗಾಗಿ 2 ಹೆಚ್ಚುವರಿ ಸಹಾಯವಾಣಿ ಸಂಖ್ಯೆಗಳನ್ನು ಸೇರಿಸಿದ್ದೇವೆ. ಈ ಕೆಳಗಿನ ಹೊಸಸಹಾಯವಾಣಿ ಸಂಖ್ಯೆಗಳನ್ನು ಸಂಪರ್ಕಿಸಲು ವಿನಂತಿಸಿದೆ +91-9240214000 +91-9240214001.</p>
+											
+										</div>
+									</marquee>
+								</div>
+							</div>
+						</div>
+
+					</div>
+				</div>
+			</div>
+		</div>
+
+		
+		
+		<footer class="footer navbar-fixed-bottom text-center bottomfooter ">		
+			ಕೃತಿಸ್ವಾಮ್ಯ &copy 2018, ಇ-ಪ್ರೊಕ್ಯೂಮೆಂಟ್, ಸಿಇಜಿ ಕರ್ನಾಟಕ
+		</footer>
+		
+		
+		<script type="text/javascript">
+			$(document).ready(function() {
+
+			});
+		</script>
+
+
+	</div>
+
+</body>
+</html>

@@ -43,10 +43,22 @@ class Bid(Base, TimestampMixin):
     tender_fee_information = Column(JSON, nullable=True)
     contact_information = Column(JSON, nullable=True)
     source_url = Column(Text(), nullable=True)
+    # Canonical URL of the original bid on the source portal (e.g. the GeM full
+    # view page or the bid document page). Populated from source_url at
+    # ingestion; used by the "View Original Bid" / "Download Bid PDF" actions.
+    original_bid_url = Column(Text(), nullable=True)
     source_name = Column(String(255), nullable=True)  # ingestion adapter / source feed name
+    # Authoritative link to the collecting data source (data_sources.id). Used
+    # for state attribution instead of the fragile Bid.source_name ==
+    # DataSource.name string join, which splits states whose portal display
+    # name has variants (e.g. "Jammu & Kashmir" vs "Jammu and Kashmir").
+    # SET NULL keeps historical bids readable even if a source row is removed.
+    source_id = Column(GUID(), ForeignKey("data_sources.id", ondelete="SET NULL"), nullable=True, index=True)
     search_text = Column(Text(), nullable=True)        # pre-computed search index text
     content_hash = Column(String(64), index=True, nullable=True)
     status = Column(String(50), default="NEW", nullable=False)  # NEW, PROCESSED, ARCHIVED, EXPIRED
+    matching_status = Column(String(50), default="PENDING", nullable=False)  # PENDING, PROCESSING, COMPLETED, FAILED
+    matched_at = Column(DateTime(timezone=True), nullable=True)
     first_discovered_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     last_updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 

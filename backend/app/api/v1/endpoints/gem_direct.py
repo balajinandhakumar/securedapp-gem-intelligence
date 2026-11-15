@@ -24,11 +24,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.config import settings
+from app.api.v1.dependencies import require_admin, require_operator, require_viewer
+from app.models.user import User
 from app.services.ingestion.gem_direct_service import (
     DEFAULT_KEYWORDS,
     get_last_gem_direct_run_info,
     gem_direct_status_payload,
     ingest_gem_direct_bids,
+    reconcile_gem_source_to_database,
 )
 from app.services.ingestion.gem_scheduler import (
     augment_collection_run_stats,
@@ -87,6 +91,12 @@ class GeMDirectFetchRequest(BaseModel):
     preview: bool = Field(
         default=False, description="Validate and report only; persist nothing."
     )
+    start_page: int = Field(
+        default=1,
+        ge=1,
+        description="Starting page for collection. Used with auto-resume to continue "
+        "from a saved checkpoint.",
+    )
 
 
 class GeMDirectFetchResponse(BaseModel):
@@ -133,6 +143,7 @@ class GeMDirectFetchResponse(BaseModel):
     errors: List[Dict[str, Any]] = []
     extracted_fields: List[Dict[str, Any]] = []
     records: List[Any] = []
+    start_page: Optional[int] = None
 
 
 class GeMDirectStatusResponse(BaseModel):
@@ -196,7 +207,9 @@ def _last_run_stats() -> Dict[str, Any]:
 
 
 @router.get("/gem-direct/status", response_model=GeMDirectStatusResponse, status_code=status.HTTP_200_OK)
-def get_gem_direct_status():
+def get_gem_direct_status(
+    current_user: Optional[User] = Depends(require_viewer),
+):
     """Return the configuration and last-run state of the direct GeM collector."""
     payload = gem_direct_status_payload()
     payload["default_keywords"] = list(DEFAULT_KEYWORDS)
@@ -217,7 +230,11 @@ def get_gem_direct_status():
 
 
 @router.post("/gem-direct/fetch", response_model=GeMDirectFetchResponse, status_code=status.HTTP_200_OK)
-def fetch_gem_bids(payload: GeMDirectFetchRequest, db: Session = Depends(get_db)):
+def fetch_gem_bids(
+    payload: GeMDirectFetchRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
+):
     """
     Manually collect public GeM bid records and push them through the existing
     ingestion and intelligence pipeline.
@@ -240,6 +257,7 @@ def fetch_gem_bids(payload: GeMDirectFetchRequest, db: Session = Depends(get_db)
         apply_keyword_filter=payload.apply_keyword_filter,
         max_pages=payload.max_pages,
         enrich_detail_pages=payload.enrich_detail_pages,
+        start_page=payload.start_page,
     )
     # Persist the full counter set on the audit row (validated / inserted /
     # updated / duplicates / rejected / errors / duration / truncated), the
@@ -250,4 +268,75 @@ def fetch_gem_bids(payload: GeMDirectFetchRequest, db: Session = Depends(get_db)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=result.get("message"))
     if result.get("status") == "NOT_CONFIGURED":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("message"))
+    return result
+
+
+class GemReconcileRequest(BaseModel):
+    max_pages: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=10000,
+        description="Maximum number of listing pages to scan for reconciliation.",
+    )
+    start_page: int = Field(
+        default=1,
+        ge=1,
+        description="Page to start reconciliation from.",
+    )
+
+
+class GemReconcileResponse(BaseModel):
+    scope: Dict[str, Any]
+    pages: Dict[str, Any]
+    source_ids: Dict[str, Any]
+    db_ids: Dict[str, Any]
+    in_source_not_db: Dict[str, Any]
+    in_db_not_source: Dict[str, Any]
+    matched: Dict[str, Any]
+    reconciliation_timestamp: str
+    stop_reason: Optional[str]
+    limit_reached: bool
+    rows_seen: int
+    parse_failures: int
+    errors: List[Dict[str, Any]]
+
+
+@router.get("/gem-direct/checkpoint", response_model=Dict[str, Any], status_code=status.HTTP_200_OK)
+def get_gem_checkpoint(
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_viewer),
+):
+    """Return the last checkpoint page for auto-resume, if configured."""
+    from app.services.ingestion.gem_direct_service import _read_checkpoint_page
+
+    checkpoint_page = _read_checkpoint_page(db)
+    auto_resume = bool(getattr(settings, "GEM_DIRECT_AUTO_RESUME", False))
+    return {
+        "auto_resume_enabled": auto_resume,
+        "last_completed_page": checkpoint_page,
+        "next_page": (checkpoint_page + 1) if checkpoint_page else 1,
+    }
+
+
+@router.post(
+    "/gem-direct/reconcile",
+    response_model=GemReconcileResponse,
+    status_code=status.HTTP_200_OK,
+)
+def reconcile_gem_source(
+    payload: GemReconcileRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
+):
+    """Reconcile the public GeM listing against the database.
+
+    Read-only: walks the GeM listing pages and compares every discovered
+    GeM bid ID against the database. No database writes are performed.
+    """
+    result = reconcile_gem_source_to_database(
+        db,
+        max_pages=payload.max_pages,
+        start_page=payload.start_page,
+        use_browser=True,
+    )
     return result

@@ -64,6 +64,10 @@ _thread: Optional[threading.Thread] = None
 _next_run_at: Optional[datetime] = None
 _last_attempt: Dict[str, Any] = {}
 _consecutive_failures = 0
+_skipped_ticks = 0
+_total_runs = 0
+_successful_runs = 0
+_was_stopped = False  # True when stop() was called; used to detect restart
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +81,9 @@ def is_enabled() -> bool:
 def interval_minutes() -> int:
     """Configured interval, clamped to at least one minute."""
     try:
-        minutes = int(getattr(settings, "GEM_DIRECT_SCHEDULER_INTERVAL_MINUTES", 60) or 0)
+        minutes = int(getattr(settings, "GEM_DIRECT_SCHEDULER_INTERVAL_MINUTES", 5) or 0)
     except (TypeError, ValueError):
-        minutes = 60
+        minutes = 5
     return max(1, minutes)
 
 
@@ -113,6 +117,30 @@ def consecutive_failures() -> int:
         return _consecutive_failures
 
 
+def skipped_ticks() -> int:
+    """Number of scheduled ticks skipped because a previous run was still running."""
+    with _state_lock:
+        return _skipped_ticks
+
+
+def total_runs() -> int:
+    """Total number of scheduler ticks attempted (including skipped/failed)."""
+    with _state_lock:
+        return _total_runs
+
+
+def successful_runs() -> int:
+    """Number of scheduler ticks that completed with status SUCCESS."""
+    with _state_lock:
+        return _successful_runs
+
+
+def was_stopped() -> bool:
+    """True if the scheduler has been stopped at least once (restart detection)."""
+    with _state_lock:
+        return _was_stopped
+
+
 def scheduler_status() -> Dict[str, Any]:
     """Secret-free scheduler description for the Data Source page."""
     return {
@@ -122,6 +150,10 @@ def scheduler_status() -> Dict[str, Any]:
         "next_run": next_run_at(),
         "last_attempt": last_attempt(),
         "consecutive_failures": consecutive_failures(),
+        "skipped_ticks": skipped_ticks(),
+        "total_runs": total_runs(),
+        "successful_runs": successful_runs(),
+        "was_stopped": was_stopped(),
     }
 
 
@@ -197,7 +229,7 @@ def augment_collection_run_stats(
 
 
 def _record_attempt(result: Dict[str, Any]) -> None:
-    global _last_attempt, _consecutive_failures
+    global _last_attempt, _consecutive_failures, _skipped_ticks
     status = str(result.get("status") or "UNKNOWN")
     with _state_lock:
         _last_attempt = {
@@ -213,6 +245,9 @@ def _record_attempt(result: Dict[str, Any]) -> None:
             "stop_reason": result.get("stop_reason"),
             "limit_reached": bool(result.get("limit_reached")),
         }
+        if status == "BUSY":
+            # A busy tick means the previous run was still running; skip and record.
+            _skipped_ticks += 1
         if status in ("ERROR", "BLOCKED"):
             _consecutive_failures += 1
         elif status != "BUSY":
@@ -235,16 +270,23 @@ def run_once(db: Optional[Session] = None) -> Dict[str, Any]:
     owns_session = db is None
     session = db if db is not None else SessionLocal()
     try:
+        global _total_runs, _successful_runs
+        _total_runs += 1
         result = ingest_gem_direct_bids(
             db=session,
             triggered_by="scheduler",
-            # Existing bounded page budget: GEM_DIRECT_MAX_PAGES (never
-            # unlimited by default), existing request delay, keyword
-            # pre-filter left at its configured (off) default.
+            # Always start from page 1 (newest bids first under
+            # GEM_DIRECT_SORT_ORDER="Bid-Start-Date-Latest"). This ensures
+            # every scheduled run revisits the newest listings to discover
+            # newly published bids. Historical backlog scanning continues
+            # via manual runs with auto-resume from checkpoint.
             max_pages=None,
+            start_page=1,
         )
         augment_collection_run_stats(session, result.get("run_id"), result)
         _record_attempt(result)
+        if result.get("status") == "SUCCESS":
+            _successful_runs += 1
         logger.info(
             "Scheduled GeM collection finished: status=%s inserted=%s updated=%s "
             "duplicates=%s rejected=%s duration=%ss",
@@ -327,7 +369,7 @@ def start() -> bool:
     Returns True when a thread is (now) running, False when the scheduler
     is disabled by configuration.
     """
-    global _thread
+    global _thread, _was_stopped
     if not is_enabled():
         logger.info(
             "GeM direct scheduler disabled (GEM_DIRECT_SCHEDULER_ENABLED=false); "
@@ -338,6 +380,7 @@ def start() -> bool:
         if _thread is not None and _thread.is_alive():
             return True
         _stop_event.clear()
+        _was_stopped = False
         _thread = threading.Thread(
             target=_loop, name="gem-direct-scheduler", daemon=True
         )
@@ -348,14 +391,27 @@ def start() -> bool:
     return True
 
 
-def stop(timeout: float = 15.0) -> None:
-    """Stop the scheduler thread and wait briefly for it to exit. Idempotent."""
-    global _thread, _next_run_at
+def stop(timeout: Optional[float] = None) -> None:
+    """Stop the scheduler thread and wait briefly for it to exit. Idempotent.
+
+    When ``timeout`` is None, uses ``GEM_DIRECT_SCHEDULER_STOP_TIMEOUT`` from
+    settings (default 60 seconds). A long-running collection (e.g. 250 pages
+    at 3s/page = 750s) needs more than the previous 15s default to finish
+    gracefully. The thread is daemon, so the process will still exit on
+    interpreter shutdown, but a longer timeout allows graceful completion.
+    """
+    global _thread, _next_run_at, _was_stopped
+    if timeout is None:
+        try:
+            timeout = float(getattr(settings, "GEM_DIRECT_SCHEDULER_STOP_TIMEOUT", 60.0) or 60.0)
+        except (TypeError, ValueError):
+            timeout = 60.0
     _stop_event.set()
     thread = _thread
     if thread is not None and thread.is_alive() and thread is not threading.current_thread():
         thread.join(timeout=timeout)
     with _state_lock:
         _next_run_at = None
+        _was_stopped = True
         if _thread is thread and (thread is None or not thread.is_alive()):
             _thread = None

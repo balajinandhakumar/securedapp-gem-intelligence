@@ -618,7 +618,14 @@ def test_vulnerability_scanner_keyword_matches_solidityshield(db):
     assert solidity_result.relevance_score > 0, (
         "SolidityShield must score > 0 for vulnerability scanner bid"
     )
-    assert solidity_result.match_state == "POSSIBLE_MATCH"
+
+    # SolidityShield is a smart-contract security product. A general network
+    # vulnerability scanner has no smart-contract domain anchor, so it is
+    # domain-gated to NEEDS_REVIEW (never auto-matched). AuditExpress is the
+    # correct product for general vulnerability scanning.
+    assert solidity_result.match_state == "NEEDS_REVIEW"
+    assert solidity_result.relevance_score == 0.3999
+    assert solidity_result.score_breakdown.get("domain_gate") == "NO_DOMAIN_ANCHOR"
 
     # Verify the signal is "vulnerability scanner" in title
     title_signals = [s for s in solidity_result.signals if s.get("field") == "title"]

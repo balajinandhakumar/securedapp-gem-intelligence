@@ -12,13 +12,16 @@ export const StatusChip: React.FC<{
   return <span className={meta.cls}>{meta.text}</span>;
 };
 
-/** Matched product chip (cyan), rendered only when a product really matched. */
+/** Matched product chip (cyan), rendered when a product really matched.
+ *  When a bid has been analysed but no product matched, shows "No Matching Product".
+ */
 export const ProductChip: React.FC<{
   productName: string | null;
   analyzed: boolean;
 }> = ({ productName, analyzed }) => {
+  if (!analyzed) return null;
+  if (!productName) return <span className="badge badge-no_match">No Matching Product</span>;
   const meta = productChip(productName, analyzed);
-  if (!meta) return null;
   return <span className={meta.cls}>{meta.text}</span>;
 };
 

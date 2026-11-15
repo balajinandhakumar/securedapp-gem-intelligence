@@ -186,9 +186,11 @@ def test_e2e_full_procurement_intelligence_workflow(client: TestClient, db):
     Analyze requirements & opportunity -> Human review -> Notification -> Evaluation.
     """
     # 1. Ingest Bid via API
+    # closing_date is set well in the future so is_bid_closed() returns False
+    # and a NEW_HIGH_RELEVANCE notification can be generated.
     csv_content = (
         "gem_bid_id,title,organisation,scope_of_work,estimated_value,closing_date\n"
-        "GEM/E2E/2026/99,Solidity Smart Contract Security Assessment,MeitY,Full vulnerability scanning and manual expert review of EVM contracts,10000000,2026-10-31\n"
+        "GEM/E2E/2026/99,Solidity Smart Contract Security Assessment,MeitY,Full vulnerability scanning and manual expert review of EVM contracts,10000000,2026-12-31\n"
     )
     files = {"file": ("e2e_bid.csv", csv_content.encode("utf-8"), "text/csv")}
     imp_res = client.post("/api/v1/ingestion/import", files=files)

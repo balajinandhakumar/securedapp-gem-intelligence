@@ -37,8 +37,14 @@ def seed_products():
     bid would score 0.0 against every product. Re-running this function (e.g. on
     container restart) creates no duplicates and never overwrites knowledge that
     an administrator has since edited through the Product Management API.
+
+    Note: Schema creation is handled by Alembic migrations (alembic upgrade head),
+    which run before this seed function. We intentionally do NOT call
+    Base.metadata.create_all() here because the SQLAlchemy model types (GUID,
+    which resolves to UUID on PostgreSQL) may differ from the migration types
+    (CHAR(36)), and create_all on an already-migrated database can cause
+    DatatypeMismatch errors.
     """
-    Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
         missing = [

@@ -1,3 +1,4 @@
+
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import Column, DateTime
@@ -7,16 +8,14 @@ from sqlalchemy.types import CHAR, TypeDecorator
 
 class GUID(TypeDecorator):
     """Platform-independent GUID type.
-    Uses PostgreSQL's UUID type, otherwise uses CHAR(36).
+    Uses CHAR(36) on all dialects (including PostgreSQL) to stay compatible
+    with Alembic migrations that define id columns as CHAR(36).
     """
     impl = CHAR
     cache_ok = True
 
     def load_dialect_impl(self, dialect):
-        if dialect.name == 'postgresql':
-            return dialect.type_descriptor(UUID())
-        else:
-            return dialect.type_descriptor(CHAR(36))
+        return dialect.type_descriptor(CHAR(36))
 
     def process_bind_param(self, value, dialect):
         if value is None:

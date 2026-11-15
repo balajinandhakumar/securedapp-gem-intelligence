@@ -1,0 +1,36 @@
+=== PHASE 5.4 BROWSER E2E RESULTS ===
+PASS | Login page loads - email=1 pwd=1 btn=1
+PASS | No uncaught console errors on login
+FAIL | Valid login loads dashboard (ADMIN) - loggedIn=false dashboard=false
+PASS | Session restored after refresh
+PASS | Logout returns to login page
+PASS | Invalid login shows error
+PASS | Invalid login does not crash (still on login)
+PASS | No credentials in console errors
+FAIL | ADMIN login succeeds
+PASS | ADMIN screen "dashboard" rendered
+PASS | ADMIN screen "bids" rendered
+PASS | ADMIN screen "state-wise-bids" rendered
+PASS | ADMIN screen "all-india-matches" rendered
+PASS | ADMIN screen "products" rendered
+PASS | ADMIN screen "notifications" rendered
+FAIL | VIEWER login succeeds
+PASS | VIEWER screen "dashboard" rendered
+PASS | VIEWER screen "bids" rendered
+PASS | VIEWER screen "state-wise-bids" rendered
+PASS | VIEWER screen "all-india-matches" rendered
+PASS | VIEWER screen "products" rendered
+PASS | VIEWER screen "notifications" rendered
+FAIL | OPERATOR login succeeds
+PASS | OPERATOR screen "dashboard" rendered
+PASS | OPERATOR screen "bids" rendered
+PASS | OPERATOR screen "state-wise-bids" rendered
+PASS | OPERATOR screen "all-india-matches" rendered
+PASS | OPERATOR screen "products" rendered
+PASS | OPERATOR screen "notifications" rendered
+PASS | Responsive desktop (1366x768) loads - overflow=false
+PASS | Responsive tablet (768x1024) loads - overflow=false
+PASS | Responsive mobile (390x844) loads - overflow=false
+PASS | Viewer can reach products screen (read-only)
+
+TOTAL: 29 passed, 4 failed

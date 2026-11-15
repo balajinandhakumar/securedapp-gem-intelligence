@@ -114,6 +114,13 @@ export const IconTarget: React.FC<IconProps> = ({ size = 15 }) => (
   </svg>
 );
 
+export const IconMapPin: React.FC<IconProps> = ({ size = 18 }) => (
+  <svg {...svgProps(size)}>
+    <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0" />
+    <circle cx="12" cy="10" r="3" />
+  </svg>
+);
+
 export const IconEyeSearch: React.FC<IconProps> = ({ size = 15 }) => (
   <svg {...svgProps(size)}>
     <path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z" />
@@ -146,5 +153,21 @@ export const IconArrowRight: React.FC<IconProps> = ({ size = 13 }) => (
 export const IconCheck: React.FC<IconProps> = ({ size = 12 }) => (
   <svg {...svgProps(size)}>
     <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+export const IconMonitor: React.FC<IconProps> = ({ size = 18 }) => (
+  <svg {...svgProps(size)}>
+    <rect x="2" y="3" width="20" height="14" rx="2" />
+    <line x1="8" y1="21" x2="16" y2="21" />
+    <line x1="12" y1="17" x2="12" y2="21" />
+  </svg>
+);
+
+export const IconLogout: React.FC<IconProps> = ({ size = 16 }) => (
+  <svg {...svgProps(size)}>
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+    <polyline points="16 17 21 12 16 7" />
+    <line x1="21" y1="12" x2="9" y2="12" />
   </svg>
 );

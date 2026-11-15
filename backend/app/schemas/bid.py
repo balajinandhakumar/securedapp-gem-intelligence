@@ -28,6 +28,7 @@ class BidBase(BaseModel):
     tender_fee_information: Optional[Dict[str, Any]] = None
     contact_information: Optional[Dict[str, Any]] = None
     source_url: Optional[str] = None
+    original_bid_url: Optional[str] = None
     status: str = "NEW"
 
 
@@ -49,6 +50,8 @@ class BidResponse(BidBase):
     last_updated_at: datetime
     created_at: datetime
     updated_at: datetime
+    matching_status: str = "PENDING"
+    matched_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 

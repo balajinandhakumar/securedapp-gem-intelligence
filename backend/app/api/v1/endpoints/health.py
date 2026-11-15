@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.core.config import settings
 from app.core.database import get_db
-from app.schemas.health import HealthResponse
+from app.schemas.health import HealthResponse, ReadinessResponse
 
 router = APIRouter()
 
@@ -23,3 +23,29 @@ def get_health(db: Session = Depends(get_db)):
         environment=settings.ENVIRONMENT,
         database_connected=db_connected
     )
+
+
+@router.get("/ready", response_model=ReadinessResponse)
+def get_readiness(db: Session = Depends(get_db)):
+    """Readiness probe: checks database connectivity and returns per-check status.
+
+    Returns 200 when all checks pass, 503 when any check fails.
+    """
+    checks = {}
+    overall = "ok"
+
+    # Database check
+    try:
+        db.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception:
+        checks["database"] = "failed"
+        overall = "degraded"
+
+    if overall == "degraded":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=ReadinessResponse(status=overall, checks=checks),
+        )
+
+    return ReadinessResponse(status=overall, checks=checks)

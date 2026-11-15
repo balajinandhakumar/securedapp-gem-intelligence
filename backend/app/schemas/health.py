@@ -6,3 +6,8 @@ class HealthResponse(BaseModel):
     project_name: str
     environment: str
     database_connected: bool
+
+
+class ReadinessResponse(BaseModel):
+    status: str
+    checks: dict

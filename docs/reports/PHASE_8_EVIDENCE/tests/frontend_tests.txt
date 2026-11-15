@@ -1,0 +1,22 @@
+
+> securedapp-gem-frontend@0.1.0 test
+> vitest run
+
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/Balaji/Desktop/securedapp-gem-intelligence/frontend[39m
+
+ [32m?£ô[39m src/lib/auth.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 27[2mms[22m[39m
+ [32m?£ô[39m src/lib/api.auth.test.ts [2m([22m[2m9 tests[22m[2m)[22m[32m 123[2mms[22m[39m
+ [32m?£ô[39m src/lib/api.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 120[2mms[22m[39m
+ [32m?£ô[39m src/context/AuthContext.test.tsx [2m([22m[2m7 tests[22m[2m)[22m[33m 588[2mms[22m[39m
+   [33m[2m?£ô[22m[39m AuthContext ?Çö mocked[2m > [22mlogin stores tokens and sets user [33m 327[2mms[22m[39m
+ [32m?£ô[39m src/components/ProductsView.test.tsx [2m([22m[2m4 tests[22m[2m)[22m[33m 638[2mms[22m[39m
+ [32m?£ô[39m src/components/AllIndiaMatchesView.test.tsx [2m([22m[2m6 tests[22m[2m)[22m[33m 815[2mms[22m[39m
+ [32m?£ô[39m src/components/StateWiseBidsView.test.tsx [2m([22m[2m10 tests[22m[2m)[22m[33m 1187[2mms[22m[39m
+   [33m[2m?£ô[22m[39m StateWiseBidsView[2m > [22mrenders state-wise bids with proper types and no any[] usage [33m 343[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m7 passed[39m[22m[90m (7)[39m
+[2m      Tests [22m [1m[32m54 passed[39m[22m[90m (54)[39m
+[2m   Start at [22m 17:10:21
+[2m   Duration [22m 8.07s[2m (transform 1.62s, setup 9.23s, collect 4.06s, tests 3.50s, environment 28.06s, prepare 2.31s)[22m
+

@@ -16,7 +16,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.api.v1.dependencies import require_admin, require_operator, require_viewer
 from app.models.source import DataSource, SourceRun
+from app.models.user import User
 from app.services.sources.adapters import (
     adapter_catalog,
     get_adapter,
@@ -123,6 +125,12 @@ def _source_out(source: DataSource) -> SourceOut:
     adapter = get_adapter(source.adapter_key)
     config = source.config or {}
     has_credentials = bool((config.get("auth") or {}).get("env_ref"))
+
+    # Unconfigured sources (disabled, no base_url) display as NOT_CONFIGURED.
+    effective_status = source.status or "IDLE"
+    if not source.enabled and not source.base_url:
+        effective_status = "NOT_CONFIGURED"
+
     return SourceOut(
         id=str(source.id),
         source_id=source.source_id,
@@ -135,7 +143,7 @@ def _source_out(source: DataSource) -> SourceOut:
         collection_interval_minutes=source.collection_interval_minutes or 60,
         config=sanitize_config(config),
         notes=source.notes,
-        status=source.status or "IDLE",
+        status=effective_status,
         last_attempt_at=source.last_attempt_at.isoformat()
         if source.last_attempt_at
         else None,
@@ -213,7 +221,9 @@ def _adapter_key_for(source_type: str, adapter_key: Optional[str]) -> str:
 
 
 @router.get("/sources/meta")
-def sources_meta():
+def sources_meta(
+    current_user: Optional[User] = Depends(require_viewer),
+):
     """Secret-free adapter catalog for the source-management UI."""
     from app.services.sources.scheduler import scheduler_status
 
@@ -224,18 +234,29 @@ def sources_meta():
 
 
 @router.get("/sources", response_model=List[SourceOut])
-def list_sources(db: Session = Depends(get_db)):
+def list_sources(
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_viewer),
+):
     sources = db.query(DataSource).order_by(DataSource.name.asc()).all()
     return [_source_out(s) for s in sources]
 
 
 @router.get("/sources/{source_id}", response_model=SourceOut)
-def get_source(source_id: str, db: Session = Depends(get_db)):
+def get_source(
+    source_id: str,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_viewer),
+):
     return _source_out(_resolve_source(db, source_id))
 
 
 @router.post("/sources", response_model=SourceOut, status_code=status.HTTP_201_CREATED)
-def create_source(payload: SourceCreate, db: Session = Depends(get_db)):
+def create_source(
+    payload: SourceCreate,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
+):
     if db.query(DataSource).filter(DataSource.source_id == payload.source_id).first():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -262,7 +283,12 @@ def create_source(payload: SourceCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/sources/{source_id}", response_model=SourceOut)
-def update_source(source_id: str, payload: SourceUpdate, db: Session = Depends(get_db)):
+def update_source(
+    source_id: str,
+    payload: SourceUpdate,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
+):
     source = _resolve_source(db, source_id)
     if payload.name is not None:
         source.name = payload.name.strip()
@@ -287,14 +313,22 @@ def update_source(source_id: str, payload: SourceUpdate, db: Session = Depends(g
 
 
 @router.delete("/sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_source(source_id: str, db: Session = Depends(get_db)):
+def delete_source(
+    source_id: str,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_admin),
+):
     source = _resolve_source(db, source_id)
     db.delete(source)
     db.commit()
 
 
 @router.post("/sources/{source_id}/enable", response_model=SourceOut)
-def enable_source(source_id: str, db: Session = Depends(get_db)):
+def enable_source(
+    source_id: str,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
+):
     source = _resolve_source(db, source_id)
     source.enabled = True
     db.commit()
@@ -303,7 +337,11 @@ def enable_source(source_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/sources/{source_id}/disable", response_model=SourceOut)
-def disable_source(source_id: str, db: Session = Depends(get_db)):
+def disable_source(
+    source_id: str,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
+):
     source = _resolve_source(db, source_id)
     source.enabled = False
     db.commit()
@@ -312,7 +350,11 @@ def disable_source(source_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/sources/{source_id}/test")
-def test_source(source_id: str, db: Session = Depends(get_db)):
+def test_source(
+    source_id: str,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
+):
     """Test connectivity to a configured source (no data ingested)."""
     source = _resolve_source(db, source_id)
     adapter = get_adapter(source.adapter_key)
@@ -334,7 +376,11 @@ def test_source(source_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/sources/{source_id}/sync")
-def sync_source(source_id: str, db: Session = Depends(get_db)):
+def sync_source(
+    source_id: str,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_operator),
+):
     """Manually collect the source now through the existing pipeline."""
     source = _resolve_source(db, source_id)
     result = run_source_sync(db, source, trigger="manual")
@@ -354,7 +400,12 @@ def sync_source(source_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/sources/{source_id}/runs", response_model=List[RunOut])
-def source_runs(source_id: str, limit: int = 30, db: Session = Depends(get_db)):
+def source_runs(
+    source_id: str,
+    limit: int = 30,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_viewer),
+):
     source = _resolve_source(db, source_id)
     limit = max(1, min(200, limit))
     runs = (
@@ -368,7 +419,11 @@ def source_runs(source_id: str, limit: int = 30, db: Session = Depends(get_db)):
 
 
 @router.get("/sources/runs/{run_id}", response_model=RunOut)
-def source_run_detail(run_id: str, db: Session = Depends(get_db)):
+def source_run_detail(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(require_viewer),
+):
     run = db.get(SourceRun, run_id)
     if run is None:
         raise HTTPException(

@@ -382,6 +382,10 @@ def run_source_sync(
                 bid_data = dict(normalized)
                 bid_data["content_hash"] = bid_data.pop("hash", None)
                 bid_data["status"] = "NEW"
+                # Authoritative state attribution: link the bid to the source
+                # that collected it, so state-wise views join on source_id
+                # rather than the fragile source_name string match.
+                bid_data["source_id"] = source.id
                 valid_bid_keys = {c.name for c in Bid.__table__.columns}
                 new_bid = Bid(
                     **{k: v for k, v in bid_data.items() if k in valid_bid_keys}
@@ -435,7 +439,17 @@ def run_source_sync(
                 status = "FAILED"
             elif not valid_records:
                 status = "NO_RECORDS"
-            if errors and status == "SUCCESS":
+
+            # Dedup warnings (repeated rows within a run or already-known DB rows)
+            # are normal operational activity, not source failures. Only genuine
+            # errors (fetch / parse / intelligence) should bump a healthy run to
+            # NEEDS_ATTENTION.
+            genuine_errors = [
+                e
+                for e in errors
+                if e.get("field", "").split(":")[0] != "dedup"
+            ]
+            if genuine_errors and status == "SUCCESS":
                 status = "NEEDS_ATTENTION"
 
             _finalize_run(
