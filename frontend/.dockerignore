@@ -1,0 +1,32 @@
+# SecuredApp frontend — Docker build context exclusions
+
+# --- Dependencies and build output (not needed in the context) ---
+node_modules/
+dist/
+build/
+
+# --- Logs and temporary runtime artifacts ---
+*.log
+*.err
+vite-*.log
+
+# --- Test artifacts ---
+playwright-report/
+screenshots/
+test-results/
+coverage/
+
+# --- Version control ---
+.git/
+.gitignore
+
+# --- Environment (never into images) ---
+.env
+.env.local
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store

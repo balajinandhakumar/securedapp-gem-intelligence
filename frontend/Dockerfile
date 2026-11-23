@@ -1,16 +1,39 @@
-# SecuredApp frontend — production Dockerfile
-# Builds the React app locally (npm run build) and copies the dist folder
-# into an nginx image for serving.
+# SecuredApp frontend — production Dockerfile (multi-stage)
 #
-# The frontend is built on the host machine (Windows/Linux/macOS) and the
-# resulting dist/ directory is copied into the Docker image. Vite produces
-# platform-independent static assets (HTML/JS/CSS), so a Windows build works
-# perfectly when served by nginx on Linux.
+# Stage 1: Build the React/Vite application with Node.
+# Stage 2: Serve the generated static assets with nginx.
+#
+# No locally pre-generated frontend/dist directory is required: the build
+# happens inside Docker using the committed lockfile.
 
+# ---------------------------------------------------------------
+# Stage 1: Build
+# ---------------------------------------------------------------
+FROM node:24-alpine AS builder
+
+WORKDIR /app
+
+# Install dependencies from the committed lockfile (reproducible builds).
+# Dev dependencies are retained because `npm run build` runs `tsc` and
+# `vite build`, which need TypeScript, Vite, and the testing toolchain.
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Copy source code and build static assets into /app/dist.
+COPY . .
+RUN npm run build
+
+# ---------------------------------------------------------------
+# Stage 2: Runtime (nginx)
+# ---------------------------------------------------------------
 FROM nginx:1.27-alpine AS runtime
 
-# Copy pre-built frontend assets
-COPY dist /usr/share/nginx/html
+# wget is required by the HEALTHCHECK (and by docker-compose's frontend probe).
+# The nginx:alpine image does not ship wget by default, so install it here.
+RUN apk add --no-cache wget ca-certificates
+
+# Copy built frontend assets from the build stage.
+COPY --from=builder /app/dist /usr/share/nginx/html
 
 # Copy nginx configuration
 COPY nginx.conf /etc/nginx/conf.d/default.conf
