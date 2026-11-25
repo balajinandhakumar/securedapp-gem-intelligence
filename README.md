@@ -144,11 +144,11 @@ docker compose down -v
 
 | Service | URL |
 |---------|-----|
-| Frontend | http://localhost:3001 |
-| Backend API | http://localhost:8000 |
-| Backend API docs (Swagger) | http://localhost:8000/docs |
-| Backend health | http://localhost:8000/api/v1/health |
-| Backend readiness | http://localhost:8000/api/v1/ready |
+| Frontend | http://localhost:3066 |
+| Backend API | http://localhost:8066 |
+| Backend API docs (Swagger) | http://localhost:8066/docs |
+| Backend health | http://localhost:8066/api/v1/health |
+| Backend readiness | http://localhost:8066/api/v1/ready |
 | PostgreSQL | localhost:5432 (internal only) |
 | Redis | localhost:6379 (internal only) |
 
