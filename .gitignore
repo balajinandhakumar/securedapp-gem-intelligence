@@ -14,7 +14,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
@@ -26,11 +25,16 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# Virtual environments
+# Virtual environments (these patterns exclude the whole venv directory tree,
+# including any nested "lib" folder, so they remain ignored).
 venv/
 .venv/
 ENV/
 env/
+
+# NOTE: Do NOT add a bare "lib/" pattern here. frontend/src/lib/ is committed
+# application source code (api.ts, auth.ts, format.ts, demoConfig.ts) and must
+# be tracked by Git; a bare "lib/" would wrongly exclude it.
 
 # IDE & Editors
 .vscode/
